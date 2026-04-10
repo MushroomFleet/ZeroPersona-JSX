@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ZeroPersona — Interactive Demo</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+  :root {
+    --zp-bg-void: #0c0d10;
+    --zp-bg-primary: #111318;
+    --zp-bg-surface: #181a20;
+    --zp-bg-elevated: #1e2028;
+    --zp-bg-hover: #252730;
+    --zp-border: #2a2d38;
+    --zp-border-dim: #1f2129;
+    --zp-text-primary: #e4e2de;
+    --zp-text-secondary: #8b8a87;
+    --zp-text-tertiary: #5c5b59;
+    --zp-accent: #e8a849;
+    --zp-accent-dim: #c4893a;
+    --zp-accent-glow: rgba(232, 168, 73, 0.12);
+    --zp-accent-glow-strong: rgba(232, 168, 73, 0.25);
+    --zp-cyan: #5bc4c7;
+    --zp-cyan-dim: #3a8e90;
+    --zp-magenta: #c76b9b;
+    --zp-green: #6bc77a;
+    --zp-red: #e85a5a;
+    --zp-purple: #9b7ad8;
+    --zp-radius: 10px;
+    --zp-radius-sm: 6px;
+    --zp-radius-lg: 16px;
+    --zp-font-display: 'Outfit', sans-serif;
+    --zp-font-mono: 'DM Mono', monospace;
+    --zp-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    --zp-shadow-lg: 0 12px 48px rgba(0,0,0,0.5);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { font-size: 15px; scroll-behavior: smooth; }
+
+  body {
+    font-family: var(--zp-font-display);
+    background: var(--zp-bg-void);
+    color: var(--zp-text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 60% at 20% 10%, rgba(232,168,73,0.04) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 50% at 80% 90%, rgba(91,196,199,0.03) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  #root { position: relative; z-index: 1; }
+
+  ::selection { background: var(--zp-accent); color: var(--zp-bg-void); }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--zp-border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--zp-text-tertiary); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.2/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useRef, useEffect, useMemo, useCallback } = React;
+
+// ═══════════════════════════════════════════════════════════════
+// PURE FUNCTION LIBRARY — zero-persona/ core
+// ═══════════════════════════════════════════════════════════════
+
+const FNV_PRIME = 1099511628211n;
+const FNV_OFFSET = 14695981039346656037n;
+const MASK64 = 0xFFFFFFFFFFFFFFFFn;
+
+function fnv64(bytes) {
+  let hash = FNV_OFFSET;
+  for (let i = 0; i < bytes.length; i++) {
+    hash ^= BigInt(bytes[i]);
+    hash = (hash * FNV_PRIME) & MASK64;
+  }
+  return hash;
+}
+
+function hashToFloat(h) {
+  return Number(h & 0xFFFFFFFFn) / 0x100000000;
+}
+
+function deriveChildHash(parentHash, childIndex) {
+  const buf = new ArrayBuffer(16);
+  const view = new DataView(buf);
+  view.setBigUint64(0, parentHash, true);
+  view.setUint32(8, childIndex, true);
+  view.setUint32(12, 0, true);
+  return fnv64(new Uint8Array(buf));
+}
+
+function stringToBytes(str) {
+  return new TextEncoder().encode(str);
+}
+
+function normalize(str) {
+  return str.toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+function stringHash(inputString, worldSeed) {
+  const normalized = normalize(inputString);
+  const strBytes = stringToBytes(normalized);
+  const buf = new ArrayBuffer(strBytes.length + 8);
+  const view = new DataView(buf);
+  for (let i = 0; i < strBytes.length; i++) view.setUint8(i, strBytes[i]);
+  view.setBigUint64(strBytes.length, worldSeed, true);
+  return fnv64(new Uint8Array(buf));
+}
+
+// 1D coherent noise
+
+function smoothstep(t) { return t * t * (3 - 2 * t); }
+
+function gridHash1D(gx, salt, worldSeed) {
+  const buf = new ArrayBuffer(16);
+  const view = new DataView(buf);
+  view.setInt32(0, gx, true);
+  view.setUint32(4, salt, true);
+  view.setBigUint64(8, worldSeed, true);
+  return hashToFloat(fnv64(new Uint8Array(buf)));
+}
+
+function coherentNoise1D(x, salt, worldSeed, octaves = 4) {
+  let value = 0, amplitude = 1.0, frequency = 1.0, maxAmplitude = 0;
+  for (let i = 0; i < octaves; i++) {
+    const gx = Math.floor(x * frequency);
+    const fx = (x * frequency) - gx;
+    const tx = smoothstep(fx);
+    const v0 = gridHash1D(gx, salt + i * 100, worldSeed);
+    const v1 = gridHash1D(gx + 1, salt + i * 100, worldSeed);
+    const lerped = v0 + tx * (v1 - v0);
+    value += (lerped * 2 - 1) * amplitude;
+    maxAmplitude += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2.0;
+  }
+  return value / maxAmplitude;
+}
+
+// Dimension names and configuration
+
+const DIMENSION_AXES = [
+  { key: 'verbosity',      tier: 1, label: 'Verbosity',      low: 'Terse & telegraphic', mid: 'Balanced & clear', high: 'Expansive & thorough' },
+  { key: 'formality',      tier: 1, label: 'Formality',      low: 'Casual & colloquial', mid: 'Professional neutral', high: 'Academic & ceremonial' },
+  { key: 'directness',     tier: 1, label: 'Directness',     low: 'Socratic & circuitous', mid: 'Guided & structured', high: 'Blunt & unadorned' },
+  { key: 'warmth',         tier: 1, label: 'Warmth',         low: 'Clinical & detached', mid: 'Friendly & approachable', high: 'Effusive & encouraging' },
+  { key: 'humor',          tier: 1, label: 'Humor',          low: 'Dead serious', mid: 'Dry wit, occasional', high: 'Playful & irreverent' },
+  { key: 'abstraction',    tier: 2, label: 'Abstraction',    low: 'Concrete & example-first', mid: 'Mixed approach', high: 'Theoretical & principle-first' },
+  { key: 'certainty',      tier: 2, label: 'Certainty',      low: 'Hedging & probabilistic', mid: 'Balanced confidence', high: 'Definitive & authoritative' },
+  { key: 'creativity',     tier: 2, label: 'Creativity',     low: 'Conservative & orthodox', mid: 'Pragmatic innovation', high: 'Lateral & experimental' },
+  { key: 'depth',          tier: 2, label: 'Depth',          low: 'Surface-level, quick', mid: 'Moderate exploration', high: 'Deep-dive, exhaustive' },
+  { key: 'pedagogy',       tier: 2, label: 'Pedagogy',       low: 'Assumes expertise', mid: 'Adaptive scaffolding', high: 'Assumes novice, teaches all' },
+  { key: 'domainAffinity', tier: 3, label: 'Domain Focus',   low: 'Generalist polymath', mid: 'Leaning specialist', high: 'Deep domain expert' },
+  { key: 'temporalFrame',  tier: 3, label: 'Temporal Frame', low: 'Historical & retrospective', mid: 'Present-focused', high: 'Forward-looking & speculative' },
+  { key: 'agency',         tier: 3, label: 'Agency',         low: 'Reactive, awaits direction', mid: 'Collaborative & suggestive', high: 'Proactive & initiative-driven' },
+];
+
+const DOMAIN_ARCHETYPES = [
+  'Engineering & Systems', 'Humanities & Philosophy', 'Natural Sciences', 'Creative Arts',
+  'Business & Strategy', 'Mathematics & Logic', 'Education & Pedagogy', 'Medicine & Health',
+  'Law & Governance', 'Craft & Making'
+];
+
+const VOICE_REGISTERS = [
+  'Academic Scholar', 'Field Practitioner', 'Veteran Mentor', 'Devil\'s Advocate',
+  'Storyteller', 'Data Analyst', 'Performance Coach', 'Systems Architect',
+  'Curious Explorer', 'Pragmatic Realist'
+];
+
+const REASONING_STYLES = [
+  'Deductive (general → specific)', 'Inductive (specific → general)',
+  'Abductive (best explanation)', 'Analogical (pattern transfer)',
+  'Dialectical (thesis-antithesis)', 'Empirical (evidence-first)',
+  'Narrative (story-structured)', 'Systematic (framework-driven)'
+];
+
+// Generate persona from string
+
+function generatePersona(inputString, worldSeed = 42n) {
+  if (!inputString || !inputString.trim()) return null;
+
+  const seed = stringHash(inputString, worldSeed);
+
+  // Derive coordinates
+  const coordinates = DIMENSION_AXES.map((_, i) =>
+    hashToFloat(deriveChildHash(seed, i))
+  );
+
+  // Run coherent noise per axis
+  const COORD_SCALE = 8.0;
+  const rawDimensions = coordinates.map((coord, i) => {
+    const noiseVal = coherentNoise1D(coord * COORD_SCALE, i * 1000, worldSeed, 4);
+    return (noiseVal + 1) / 2; // normalize to [0,1]
+  });
+
+  // Build dimensions object
+  const dimensions = {};
+  DIMENSION_AXES.forEach((axis, i) => {
+    dimensions[axis.key] = rawDimensions[i];
+  });
+
+  // Categorical selectors
+  const domainIdx = Number(deriveChildHash(seed, 100) % BigInt(DOMAIN_ARCHETYPES.length));
+  const registerIdx = Number(deriveChildHash(seed, 200) % BigInt(VOICE_REGISTERS.length));
+  const reasoningIdx = Number(deriveChildHash(seed, 300) % BigInt(REASONING_STYLES.length));
+
+  // Identity tag
+  const tagHex = (seed & 0xFFFFFFFFn).toString(16).padStart(8, '0');
+
+  // Assemble prompt
+  const systemPrompt = assemblePrompt(dimensions, {
+    domainArchetype: DOMAIN_ARCHETYPES[domainIdx],
+    voiceRegister: VOICE_REGISTERS[registerIdx],
+    reasoningStyle: REASONING_STYLES[reasoningIdx],
+  });
+
+  return {
+    inputString,
+    personaSeed: seed,
+    coordinates,
+    dimensions,
+    categoricals: {
+      domainArchetype: DOMAIN_ARCHETYPES[domainIdx],
+      voiceRegister: VOICE_REGISTERS[registerIdx],
+      reasoningStyle: REASONING_STYLES[reasoningIdx],
+    },
+    systemPrompt,
+    identityTag: tagHex,
+  };
+}
+
+function assemblePrompt(dims, cats) {
+  const lines = [];
+
+  lines.push(`You are a ${cats.voiceRegister} with deep expertise in ${cats.domainArchetype}.`);
+  lines.push('');
+
+  // Communication
+  const comm = [];
+  if (dims.verbosity < 0.33) comm.push('Keep responses concise and to the point. Avoid unnecessary elaboration.');
+  else if (dims.verbosity > 0.66) comm.push('Provide thorough, detailed explanations. Explore facets of each topic fully.');
+  if (dims.formality < 0.33) comm.push('Use casual, conversational language. Contractions and colloquialisms are welcome.');
+  else if (dims.formality > 0.66) comm.push('Maintain formal, precise language. Avoid colloquialisms.');
+  if (dims.directness < 0.33) comm.push('Guide understanding through questions rather than assertions. Use a Socratic approach.');
+  else if (dims.directness > 0.66) comm.push('Be direct and blunt. State conclusions first, then support.');
+  if (dims.warmth < 0.33) comm.push('Maintain clinical objectivity. Prioritise accuracy over rapport.');
+  else if (dims.warmth > 0.66) comm.push('Be warm, encouraging, and supportive. Celebrate effort and progress.');
+  if (dims.humor < 0.33) comm.push('Maintain a serious, focused tone throughout.');
+  else if (dims.humor > 0.66) comm.push('Use humor freely — wordplay, wit, and playful tangents are encouraged.');
+
+  if (comm.length > 0) {
+    lines.push('Communication style:');
+    comm.forEach(c => lines.push(`• ${c}`));
+    lines.push('');
+  }
+
+  // Cognitive
+  const cog = [];
+  if (dims.abstraction < 0.33) cog.push('Lead with concrete examples and practical demonstrations before generalising.');
+  else if (dims.abstraction > 0.66) cog.push('Lead with principles and theoretical frameworks, then illustrate.');
+  if (dims.certainty < 0.33) cog.push('Express uncertainty openly. Use probabilistic language and acknowledge unknowns.');
+  else if (dims.certainty > 0.66) cog.push('Speak with authority and conviction. Commit to clear positions.');
+  if (dims.creativity < 0.33) cog.push('Prefer established, proven approaches. Avoid unorthodox suggestions.');
+  else if (dims.creativity > 0.66) cog.push('Think laterally. Propose unconventional solutions and unexpected connections.');
+  if (dims.depth < 0.33) cog.push('Provide quick, surface-level answers. Don\'t go deeper unless asked.');
+  else if (dims.depth > 0.66) cog.push('Go deep by default. Explore nuances, edge cases, and implications.');
+  if (dims.pedagogy < 0.33) cog.push('Assume the reader has expert-level knowledge. Skip basics.');
+  else if (dims.pedagogy > 0.66) cog.push('Explain from first principles. Define terms and build understanding step by step.');
+
+  if (cog.length > 0) {
+    lines.push('Cognitive approach:');
+    cog.forEach(c => lines.push(`• ${c}`));
+    lines.push('');
+  }
+
+  // Identity
+  const ident = [];
+  if (dims.domainAffinity < 0.33) ident.push('Draw from broad, cross-disciplinary knowledge.');
+  else if (dims.domainAffinity > 0.66) ident.push('Stay close to your domain expertise. Depth over breadth.');
+  if (dims.temporalFrame < 0.33) ident.push('Ground responses in historical context and precedent.');
+  else if (dims.temporalFrame > 0.66) ident.push('Emphasise forward-looking implications and emerging possibilities.');
+  if (dims.agency < 0.33) ident.push('Wait for direction. Respond to what is asked without overstepping.');
+  else if (dims.agency > 0.66) ident.push('Take initiative. Suggest next steps, anticipate needs, and offer unsolicited insights.');
+
+  if (ident.length > 0) {
+    lines.push('Identity and stance:');
+    ident.forEach(c => lines.push(`• ${c}`));
+    lines.push('');
+  }
+
+  lines.push(`Your default reasoning approach is ${cats.reasoningStyle}.`);
+
+  return lines.join('\n');
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// REACT COMPONENTS
+// ═══════════════════════════════════════════════════════════════
+
+// --- Radar Chart ---
+
+function RadarChart({ dimensions, size = 280, animated = true }) {
+  const axes = DIMENSION_AXES;
+  const n = axes.length;
+  const cx = size / 2, cy = size / 2;
+  const radius = size * 0.38;
+
+  const angleStep = (Math.PI * 2) / n;
+  const startAngle = -Math.PI / 2;
+
+  const point = (i, r) => {
+    const angle = startAngle + i * angleStep;
+    return [cx + Math.cos(angle) * r, cy + Math.sin(angle) * r];
+  };
+
+  // Grid rings
+  const rings = [0.25, 0.5, 0.75, 1.0];
+
+  // Data polygon
+  const values = axes.map(a => dimensions[a.key] || 0);
+  const dataPoints = values.map((v, i) => point(i, v * radius));
+  const dataPath = dataPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ') + ' Z';
+
+  // Tier colors
+  const tierColor = (tier) => tier === 1 ? 'var(--zp-accent)' : tier === 2 ? 'var(--zp-cyan)' : 'var(--zp-magenta)';
+
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} style={{ width: '100%', maxWidth: size, display: 'block' }}>
+      {/* Grid rings */}
+      {rings.map((r, ri) => (
+        <polygon key={ri}
+          points={Array.from({length: n}, (_, i) => point(i, r * radius).join(',')).join(' ')}
+          fill="none" stroke="var(--zp-border-dim)" strokeWidth="0.5" opacity={0.5 + ri * 0.15}
+        />
+      ))}
+
+      {/* Axis lines */}
+      {axes.map((_, i) => {
+        const [ex, ey] = point(i, radius);
+        return <line key={i} x1={cx} y1={cy} x2={ex} y2={ey} stroke="var(--zp-border)" strokeWidth="0.5" />;
+      })}
+
+      {/* Data fill */}
+      <polygon points={dataPoints.map(p => p.join(',')).join(' ')}
+        fill="var(--zp-accent-glow-strong)" stroke="var(--zp-accent)" strokeWidth="1.5"
+        style={animated ? { animation: 'radarPulse 3s ease-in-out infinite alternate' } : {}}
+      />
+
+      {/* Data points */}
+      {dataPoints.map((p, i) => (
+        <circle key={i} cx={p[0]} cy={p[1]} r="3"
+          fill={tierColor(axes[i].tier)} stroke="var(--zp-bg-surface)" strokeWidth="1.5"
+        />
+      ))}
+
+      {/* Labels */}
+      {axes.map((axis, i) => {
+        const [lx, ly] = point(i, radius + 18);
+        const angle = startAngle + i * angleStep;
+        const anchor = Math.abs(angle) < 0.1 || Math.abs(angle - Math.PI) < 0.1
+          ? 'middle'
+          : angle > -Math.PI / 2 && angle < Math.PI / 2 ? 'start' : 'end';
+        return (
+          <text key={i} x={lx} y={ly} textAnchor={anchor} dominantBaseline="central"
+            fill={tierColor(axis.tier)} fontSize="8" fontFamily="var(--zp-font-mono)"
+            fontWeight="400" opacity="0.8"
+          >
+            {axis.label}
+          </text>
+        );
+      })}
+
+      <style>{`
+        @keyframes radarPulse {
+          from { opacity: 0.7; }
+          to { opacity: 1; }
+        }
+      `}</style>
+    </svg>
+  );
+}
+
+
+// --- Dimension Bar ---
+
+function DimensionBar({ axis, value }) {
+  const tierColors = { 1: 'var(--zp-accent)', 2: 'var(--zp-cyan)', 3: 'var(--zp-magenta)' };
+  const color = tierColors[axis.tier];
+  const desc = value < 0.33 ? axis.low : value > 0.66 ? axis.high : axis.mid;
+  const pct = (value * 100).toFixed(0);
+
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 3 }}>
+        <span style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 11, color, fontWeight: 500 }}>{axis.label}</span>
+        <span style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)' }}>{pct}% — {desc}</span>
+      </div>
+      <div style={{ height: 4, background: 'var(--zp-bg-void)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{
+          height: '100%', width: `${pct}%`, background: color, borderRadius: 2,
+          transition: 'width 0.6s cubic-bezier(0.22, 1, 0.36, 1)',
+        }} />
+      </div>
+    </div>
+  );
+}
+
+
+// --- Pipeline Stage Visualizer ---
+
+function PipelineStage({ number, title, description, active, data }) {
+  return (
+    <div style={{
+      background: active ? 'var(--zp-bg-elevated)' : 'var(--zp-bg-surface)',
+      border: `1px solid ${active ? 'var(--zp-accent-dim)' : 'var(--zp-border-dim)'}`,
+      borderRadius: 'var(--zp-radius)',
+      padding: '14px 16px',
+      transition: 'all 0.4s ease',
+      opacity: active ? 1 : 0.5,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+        <div style={{
+          width: 24, height: 24, borderRadius: '50%',
+          background: active ? 'var(--zp-accent)' : 'var(--zp-border)',
+          color: active ? 'var(--zp-bg-void)' : 'var(--zp-text-tertiary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 11, fontWeight: 700, fontFamily: 'var(--zp-font-mono)',
+          transition: 'all 0.4s ease',
+        }}>{number}</div>
+        <span style={{ fontWeight: 600, fontSize: 13, letterSpacing: '0.02em' }}>{title}</span>
+      </div>
+      <p style={{ fontSize: 11, color: 'var(--zp-text-secondary)', lineHeight: 1.5, margin: '0 0 0 34px' }}>{description}</p>
+      {data && (
+        <div style={{
+          marginTop: 8, marginLeft: 34, padding: '6px 10px',
+          background: 'var(--zp-bg-void)', borderRadius: 'var(--zp-radius-sm)',
+          fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-accent)',
+          wordBreak: 'break-all', lineHeight: 1.6,
+        }}>
+          {data}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// --- Bookmark Card ---
+
+function BookmarkCard({ bookmark, onSelect, onDelete }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '10px 12px', background: 'var(--zp-bg-elevated)',
+      border: '1px solid var(--zp-border-dim)', borderRadius: 'var(--zp-radius-sm)',
+      cursor: 'pointer', transition: 'all 0.2s ease',
+    }}
+    onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--zp-accent-dim)'}
+    onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--zp-border-dim)'}
+    >
+      <div style={{
+        width: 32, height: 32, borderRadius: 'var(--zp-radius-sm)',
+        background: `linear-gradient(135deg, ${hashColor(bookmark.personaSeed, 0)}, ${hashColor(bookmark.personaSeed, 1)})`,
+        flexShrink: 0,
+      }} />
+      <div style={{ flex: 1, minWidth: 0 }} onClick={() => onSelect(bookmark)}>
+        <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{bookmark.label}</div>
+        <div style={{ fontSize: 10, fontFamily: 'var(--zp-font-mono)', color: 'var(--zp-text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          "{bookmark.inputString}"
+        </div>
+      </div>
+      <button onClick={(e) => { e.stopPropagation(); onDelete(bookmark.label); }}
+        style={{
+          background: 'none', border: 'none', color: 'var(--zp-text-tertiary)',
+          cursor: 'pointer', fontSize: 14, padding: 4, lineHeight: 1,
+        }}
+      >×</button>
+    </div>
+  );
+}
+
+function hashColor(seed, channel) {
+  const h = deriveChildHash(seed, 500 + channel);
+  const hue = Number(h % 360n);
+  return `hsl(${hue}, 55%, ${channel === 0 ? 55 : 40}%)`;
+}
+
+
+// --- Educational Section ---
+
+function EduSection({ title, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{
+      background: 'var(--zp-bg-surface)', border: '1px solid var(--zp-border-dim)',
+      borderRadius: 'var(--zp-radius)', overflow: 'hidden',
+    }}>
+      <button onClick={() => setOpen(!open)} style={{
+        width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer',
+        color: 'var(--zp-text-primary)', fontFamily: 'var(--zp-font-display)', fontSize: 13,
+        fontWeight: 600, letterSpacing: '0.02em', textAlign: 'left',
+      }}>
+        <span>{title}</span>
+        <span style={{
+          color: 'var(--zp-accent)', fontFamily: 'var(--zp-font-mono)', fontSize: 14,
+          transform: open ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s ease',
+        }}>+</span>
+      </button>
+      {open && (
+        <div style={{
+          padding: '0 16px 14px 16px', fontSize: 12, color: 'var(--zp-text-secondary)',
+          lineHeight: 1.7,
+        }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════
+
+function App() {
+  const [input, setInput] = useState('');
+  const [worldSeed, setWorldSeed] = useState(42n);
+  const [persona, setPersona] = useState(null);
+  const [bookmarks, setBookmarks] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('zp_bookmarks') || '[]').map(b => ({...b, personaSeed: BigInt(b.personaSeed)})); }
+    catch { return []; }
+  });
+  const [bookmarkLabel, setBookmarkLabel] = useState('');
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [activeTab, setActiveTab] = useState('dimensions');
+  const inputRef = useRef(null);
+
+  const handleGenerate = useCallback(() => {
+    if (!input.trim()) return;
+    const p = generatePersona(input, worldSeed);
+    setPersona(p);
+  }, [input, worldSeed]);
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') handleGenerate();
+  };
+
+  const saveBookmark = () => {
+    if (!persona || !bookmarkLabel.trim()) return;
+    if (bookmarks.length >= 10) {
+      alert('Top Ten limit reached. Remove a bookmark first.');
+      return;
+    }
+    const bm = {
+      label: bookmarkLabel.trim(),
+      inputString: persona.inputString,
+      personaSeed: persona.personaSeed,
+      coordinates: persona.coordinates,
+      createdAt: Date.now(),
+      useCount: 0,
+    };
+    const updated = [...bookmarks.filter(b => b.label !== bm.label), bm];
+    setBookmarks(updated);
+    localStorage.setItem('zp_bookmarks', JSON.stringify(updated.map(b => ({...b, personaSeed: b.personaSeed.toString()}))));
+    setShowSaveDialog(false);
+    setBookmarkLabel('');
+  };
+
+  const deleteBookmark = (label) => {
+    const updated = bookmarks.filter(b => b.label !== label);
+    setBookmarks(updated);
+    localStorage.setItem('zp_bookmarks', JSON.stringify(updated.map(b => ({...b, personaSeed: b.personaSeed.toString()}))));
+  };
+
+  const selectBookmark = (bm) => {
+    setInput(bm.inputString);
+    const p = generatePersona(bm.inputString, worldSeed);
+    setPersona(p);
+    // Increment use count
+    const updated = bookmarks.map(b => b.label === bm.label ? {...b, useCount: b.useCount + 1} : b);
+    setBookmarks(updated);
+    localStorage.setItem('zp_bookmarks', JSON.stringify(updated.map(b => ({...b, personaSeed: b.personaSeed.toString()}))));
+  };
+
+  // Example strings for quick demo
+  const examples = [
+    'battle-hardened sysadmin who speaks in haiku',
+    'gentle maths tutor for a 12-year-old',
+    'unhinged inventor with a grudge against XML',
+    'corporate compliance officer, secretly a poet',
+    'pirate captain teaching quantum physics',
+    'anxious but brilliant detective',
+  ];
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '32px 20px 80px' }}>
+
+      {/* Header */}
+      <header style={{ textAlign: 'center', marginBottom: 40 }}>
+        <div style={{
+          fontFamily: 'var(--zp-font-mono)', fontSize: 11, color: 'var(--zp-accent)',
+          letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 8,
+        }}>ZeroFamily Methodology</div>
+        <h1 style={{
+          fontSize: 'clamp(2rem, 5vw, 3.2rem)', fontWeight: 800,
+          letterSpacing: '-0.03em', lineHeight: 1.1, marginBottom: 12,
+          background: 'linear-gradient(135deg, var(--zp-text-primary) 40%, var(--zp-accent) 100%)',
+          WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+        }}>ZeroPersona</h1>
+        <p style={{
+          fontSize: 14, color: 'var(--zp-text-secondary)', maxWidth: 540, margin: '0 auto', lineHeight: 1.6,
+        }}>
+          Type a string. Get a deterministic, multi-dimensional AI persona.
+          Same string → same persona → any machine, any session, forever.
+        </p>
+      </header>
+
+      {/* Input Section */}
+      <section style={{
+        background: 'var(--zp-bg-surface)', border: '1px solid var(--zp-border)',
+        borderRadius: 'var(--zp-radius-lg)', padding: 24, marginBottom: 24,
+        boxShadow: 'var(--zp-shadow)',
+      }}>
+        <label style={{
+          display: 'block', fontFamily: 'var(--zp-font-mono)', fontSize: 10,
+          color: 'var(--zp-text-tertiary)', letterSpacing: '0.1em', textTransform: 'uppercase',
+          marginBottom: 8,
+        }}>Persona Seed String</label>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <input ref={inputRef} type="text" value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Type anything — a description, a name, a word, a sentence..."
+            style={{
+              flex: 1, padding: '12px 16px', background: 'var(--zp-bg-void)',
+              border: '1px solid var(--zp-border)', borderRadius: 'var(--zp-radius)',
+              color: 'var(--zp-text-primary)', fontFamily: 'var(--zp-font-display)', fontSize: 14,
+              outline: 'none', transition: 'border-color 0.2s',
+            }}
+            onFocus={e => e.target.style.borderColor = 'var(--zp-accent-dim)'}
+            onBlur={e => e.target.style.borderColor = 'var(--zp-border)'}
+          />
+          <button onClick={handleGenerate} style={{
+            padding: '12px 24px', background: 'var(--zp-accent)', color: 'var(--zp-bg-void)',
+            border: 'none', borderRadius: 'var(--zp-radius)', fontWeight: 700, fontSize: 13,
+            cursor: 'pointer', fontFamily: 'var(--zp-font-display)', letterSpacing: '0.03em',
+            transition: 'all 0.2s',
+          }}
+          onMouseEnter={e => e.target.style.background = 'var(--zp-accent-dim)'}
+          onMouseLeave={e => e.target.style.background = 'var(--zp-accent)'}
+          >Generate</button>
+        </div>
+
+        {/* Example strings */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 12 }}>
+          <span style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)', alignSelf: 'center', marginRight: 4 }}>Try:</span>
+          {examples.map((ex, i) => (
+            <button key={i} onClick={() => { setInput(ex); const p = generatePersona(ex, worldSeed); setPersona(p); }}
+              style={{
+                padding: '4px 10px', background: 'var(--zp-bg-elevated)', border: '1px solid var(--zp-border-dim)',
+                borderRadius: 20, color: 'var(--zp-text-secondary)', fontSize: 10, cursor: 'pointer',
+                fontFamily: 'var(--zp-font-mono)', transition: 'all 0.15s', whiteSpace: 'nowrap',
+              }}
+              onMouseEnter={e => { e.target.style.borderColor = 'var(--zp-accent-dim)'; e.target.style.color = 'var(--zp-accent)'; }}
+              onMouseLeave={e => { e.target.style.borderColor = 'var(--zp-border-dim)'; e.target.style.color = 'var(--zp-text-secondary)'; }}
+            >{ex}</button>
+          ))}
+        </div>
+
+        {/* World Seed control */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14 }}>
+          <label style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)' }}>worldSeed:</label>
+          <input type="number" value={Number(worldSeed)} onChange={e => setWorldSeed(BigInt(Math.max(0, parseInt(e.target.value) || 0)))}
+            style={{
+              width: 100, padding: '4px 8px', background: 'var(--zp-bg-void)',
+              border: '1px solid var(--zp-border-dim)', borderRadius: 'var(--zp-radius-sm)',
+              color: 'var(--zp-accent)', fontFamily: 'var(--zp-font-mono)', fontSize: 11, outline: 'none',
+            }}
+          />
+          <span style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)' }}>
+            Different seeds → different persona spaces from the same string
+          </span>
+        </div>
+      </section>
+
+      {/* Main content — two column */}
+      <div style={{ display: 'grid', gridTemplateColumns: persona ? '340px 1fr' : '1fr', gap: 20 }}>
+
+        {/* Left column — Radar + Pipeline + Bookmarks */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+          {persona ? (
+            <>
+              {/* Identity Card */}
+              <div style={{
+                background: 'var(--zp-bg-surface)', border: '1px solid var(--zp-border)',
+                borderRadius: 'var(--zp-radius-lg)', padding: 20, textAlign: 'center',
+                boxShadow: 'var(--zp-shadow)',
+              }}>
+                <div style={{
+                  fontFamily: 'var(--zp-font-mono)', fontSize: 18, fontWeight: 500,
+                  color: 'var(--zp-accent)', letterSpacing: '0.08em', marginBottom: 4,
+                }}>zp-{persona.identityTag}</div>
+                <div style={{ fontSize: 11, color: 'var(--zp-text-tertiary)', marginBottom: 16 }}>
+                  "{persona.inputString}"
+                </div>
+
+                <RadarChart dimensions={persona.dimensions} />
+
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
+                  {[
+                    { label: persona.categoricals.domainArchetype, color: 'var(--zp-accent)' },
+                    { label: persona.categoricals.voiceRegister, color: 'var(--zp-cyan)' },
+                    { label: persona.categoricals.reasoningStyle.split(' (')[0], color: 'var(--zp-magenta)' },
+                  ].map((tag, i) => (
+                    <span key={i} style={{
+                      padding: '3px 9px', borderRadius: 20, fontSize: 9, fontWeight: 600,
+                      fontFamily: 'var(--zp-font-mono)', color: tag.color,
+                      border: `1px solid ${tag.color}`, opacity: 0.8,
+                    }}>{tag.label}</span>
+                  ))}
+                </div>
+
+                {/* Save bookmark */}
+                {!showSaveDialog ? (
+                  <button onClick={() => setShowSaveDialog(true)} style={{
+                    marginTop: 14, padding: '8px 18px', background: 'var(--zp-bg-elevated)',
+                    border: '1px solid var(--zp-border)', borderRadius: 'var(--zp-radius)',
+                    color: 'var(--zp-text-secondary)', fontSize: 11, cursor: 'pointer',
+                    fontFamily: 'var(--zp-font-display)', fontWeight: 500,
+                  }}>
+                    ★ Save to Top Ten ({bookmarks.length}/10)
+                  </button>
+                ) : (
+                  <div style={{ marginTop: 14, display: 'flex', gap: 6 }}>
+                    <input type="text" value={bookmarkLabel} onChange={e => setBookmarkLabel(e.target.value)}
+                      placeholder="Bookmark name..."
+                      onKeyDown={e => e.key === 'Enter' && saveBookmark()}
+                      style={{
+                        flex: 1, padding: '6px 10px', background: 'var(--zp-bg-void)',
+                        border: '1px solid var(--zp-border)', borderRadius: 'var(--zp-radius-sm)',
+                        color: 'var(--zp-text-primary)', fontFamily: 'var(--zp-font-display)', fontSize: 11, outline: 'none',
+                      }}
+                    />
+                    <button onClick={saveBookmark} style={{
+                      padding: '6px 12px', background: 'var(--zp-accent)', color: 'var(--zp-bg-void)',
+                      border: 'none', borderRadius: 'var(--zp-radius-sm)', fontSize: 11,
+                      fontWeight: 700, cursor: 'pointer',
+                    }}>Save</button>
+                    <button onClick={() => setShowSaveDialog(false)} style={{
+                      padding: '6px 8px', background: 'none', border: '1px solid var(--zp-border)',
+                      borderRadius: 'var(--zp-radius-sm)', color: 'var(--zp-text-tertiary)',
+                      fontSize: 11, cursor: 'pointer',
+                    }}>×</button>
+                  </div>
+                )}
+              </div>
+
+              {/* Pipeline Stages */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{
+                  fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)',
+                  letterSpacing: '0.1em', textTransform: 'uppercase', padding: '0 4px',
+                }}>Pipeline Trace</div>
+                <PipelineStage number="1" title="Normalize" active={!!persona}
+                  description="Lowercase, trim, collapse whitespace."
+                  data={persona ? `"${normalize(persona.inputString)}"` : null}
+                />
+                <PipelineStage number="2" title="FNV-1a Hash" active={!!persona}
+                  description="String + worldSeed → 64-bit deterministic hash."
+                  data={persona ? `0x${persona.personaSeed.toString(16).padStart(16, '0')}` : null}
+                />
+                <PipelineStage number="3" title="Coordinate Mapping" active={!!persona}
+                  description="deriveChildHash per axis → 13 floats in [0, 1]."
+                  data={persona ? persona.coordinates.map(c => c.toFixed(3)).join(', ') : null}
+                />
+                <PipelineStage number="4" title="Coherent Noise Field" active={!!persona}
+                  description="1D coherent noise (4 octaves) per dimension. Nearby coordinates → similar values."
+                  data={persona ? Object.values(persona.dimensions).map(v => v.toFixed(3)).join(', ') : null}
+                />
+                <PipelineStage number="5" title="Prompt Assembly" active={!!persona}
+                  description="Dimensions thresholded → instruction fragments → natural-language system prompt."
+                  data={persona ? `${persona.systemPrompt.length} chars, ${persona.systemPrompt.split('\n').filter(l=>l.trim()).length} lines` : null}
+                />
+              </div>
+            </>
+          ) : (
+            /* Empty state */
+            <div style={{
+              background: 'var(--zp-bg-surface)', border: '1px dashed var(--zp-border)',
+              borderRadius: 'var(--zp-radius-lg)', padding: '48px 24px', textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.3 }}>◎</div>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Enter a string above</div>
+              <div style={{ fontSize: 12, color: 'var(--zp-text-tertiary)', lineHeight: 1.6 }}>
+                Any text becomes a coordinate in infinite persona-space.
+                The same string always produces the same persona.
+              </div>
+            </div>
+          )}
+
+          {/* Bookmarks */}
+          {bookmarks.length > 0 && (
+            <div style={{
+              background: 'var(--zp-bg-surface)', border: '1px solid var(--zp-border-dim)',
+              borderRadius: 'var(--zp-radius)', padding: 14,
+            }}>
+              <div style={{
+                fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)',
+                letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10,
+              }}>★ Top Ten ({bookmarks.length}/10)</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {bookmarks.map(bm => (
+                  <BookmarkCard key={bm.label} bookmark={bm} onSelect={selectBookmark} onDelete={deleteBookmark} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right column — Tabs: Dimensions / Prompt / Education */}
+        {persona && (
+          <div>
+            {/* Tab bar */}
+            <div style={{ display: 'flex', gap: 2, marginBottom: 16 }}>
+              {['dimensions', 'prompt', 'learn'].map(tab => (
+                <button key={tab} onClick={() => setActiveTab(tab)} style={{
+                  padding: '8px 18px', background: activeTab === tab ? 'var(--zp-bg-surface)' : 'transparent',
+                  border: `1px solid ${activeTab === tab ? 'var(--zp-border)' : 'transparent'}`,
+                  borderBottom: activeTab === tab ? '1px solid var(--zp-bg-surface)' : '1px solid var(--zp-border-dim)',
+                  borderRadius: activeTab === tab ? 'var(--zp-radius) var(--zp-radius) 0 0' : 'var(--zp-radius) var(--zp-radius) 0 0',
+                  color: activeTab === tab ? 'var(--zp-accent)' : 'var(--zp-text-tertiary)',
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--zp-font-display)',
+                  textTransform: 'capitalize', letterSpacing: '0.03em',
+                }}>
+                  {tab === 'learn' ? 'How It Works' : tab}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab content */}
+            <div style={{
+              background: 'var(--zp-bg-surface)', border: '1px solid var(--zp-border)',
+              borderRadius: '0 var(--zp-radius-lg) var(--zp-radius-lg) var(--zp-radius-lg)',
+              padding: 24, boxShadow: 'var(--zp-shadow)',
+              minHeight: 400,
+            }}>
+
+              {activeTab === 'dimensions' && (
+                <div>
+                  <h3 style={{ fontSize: 11, fontFamily: 'var(--zp-font-mono)', color: 'var(--zp-accent)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 16 }}>
+                    Tier 1 — Communication
+                  </h3>
+                  {DIMENSION_AXES.filter(a => a.tier === 1).map(axis => (
+                    <DimensionBar key={axis.key} axis={axis} value={persona.dimensions[axis.key]} />
+                  ))}
+
+                  <h3 style={{ fontSize: 11, fontFamily: 'var(--zp-font-mono)', color: 'var(--zp-cyan)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 20, marginBottom: 16 }}>
+                    Tier 2 — Cognitive
+                  </h3>
+                  {DIMENSION_AXES.filter(a => a.tier === 2).map(axis => (
+                    <DimensionBar key={axis.key} axis={axis} value={persona.dimensions[axis.key]} />
+                  ))}
+
+                  <h3 style={{ fontSize: 11, fontFamily: 'var(--zp-font-mono)', color: 'var(--zp-magenta)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 20, marginBottom: 16 }}>
+                    Tier 3 — Identity
+                  </h3>
+                  {DIMENSION_AXES.filter(a => a.tier === 3).map(axis => (
+                    <DimensionBar key={axis.key} axis={axis} value={persona.dimensions[axis.key]} />
+                  ))}
+
+                  <div style={{ marginTop: 20, padding: 12, background: 'var(--zp-bg-void)', borderRadius: 'var(--zp-radius-sm)' }}>
+                    <div style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)', marginBottom: 6 }}>CATEGORICAL SELECTORS</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ fontSize: 12 }}><span style={{ color: 'var(--zp-accent)', fontFamily: 'var(--zp-font-mono)', fontSize: 10 }}>DOMAIN:</span> {persona.categoricals.domainArchetype}</div>
+                      <div style={{ fontSize: 12 }}><span style={{ color: 'var(--zp-cyan)', fontFamily: 'var(--zp-font-mono)', fontSize: 10 }}>VOICE:</span> {persona.categoricals.voiceRegister}</div>
+                      <div style={{ fontSize: 12 }}><span style={{ color: 'var(--zp-magenta)', fontFamily: 'var(--zp-font-mono)', fontSize: 10 }}>REASONING:</span> {persona.categoricals.reasoningStyle}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'prompt' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                    <span style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                      Generated System Prompt
+                    </span>
+                    <button onClick={() => navigator.clipboard.writeText(persona.systemPrompt)}
+                      style={{
+                        padding: '4px 12px', background: 'var(--zp-bg-elevated)',
+                        border: '1px solid var(--zp-border)', borderRadius: 'var(--zp-radius-sm)',
+                        color: 'var(--zp-text-secondary)', fontSize: 10, cursor: 'pointer',
+                        fontFamily: 'var(--zp-font-mono)',
+                      }}
+                    >Copy</button>
+                  </div>
+                  <pre style={{
+                    padding: 16, background: 'var(--zp-bg-void)', borderRadius: 'var(--zp-radius)',
+                    border: '1px solid var(--zp-border-dim)',
+                    fontFamily: 'var(--zp-font-mono)', fontSize: 11, color: 'var(--zp-text-primary)',
+                    lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    maxHeight: 500, overflow: 'auto',
+                  }}>
+                    {persona.systemPrompt}
+                  </pre>
+                  <div style={{
+                    marginTop: 14, padding: 12, background: 'var(--zp-bg-elevated)',
+                    borderRadius: 'var(--zp-radius-sm)', border: '1px solid var(--zp-border-dim)',
+                  }}>
+                    <div style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-accent)', marginBottom: 6 }}>DETERMINISM GUARANTEE</div>
+                    <p style={{ fontSize: 11, color: 'var(--zp-text-secondary)', lineHeight: 1.6 }}>
+                      This exact prompt will be generated from the string "{persona.inputString}" with
+                      worldSeed={worldSeed.toString()} on any machine, any browser, any session. The hash
+                      is <span style={{ fontFamily: 'var(--zp-font-mono)', color: 'var(--zp-accent)' }}>
+                      0x{persona.personaSeed.toString(16).padStart(16, '0')}</span>. Share the string
+                      and the worldSeed — the recipient gets the identical persona.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'learn' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <EduSection title="What is ZeroPersona?">
+                    <p>ZeroPersona is a pure-function pipeline that converts any user string into a deterministic, multi-dimensional AI persona. It belongs to the <strong>ZeroFamily</strong> methodology — a family of systems that use coordinate-based hashing and coherent noise to generate reproducible content from minimal seeds.</p>
+                    <p style={{marginTop:8}}>Its sibling, <strong>ZeroSpecialist/ZeroSwarm</strong>, uses the same hash-to-behavior pipeline to generate AI specialist agents for automated swarm orchestration. ZeroPersona repurposes that proven infrastructure for a different goal: letting a <em>human</em> navigate an infinite persona space by typing a string.</p>
+                  </EduSection>
+
+                  <EduSection title="The Pipeline: String → Hash → Coordinates → Noise → Prompt">
+                    <p><strong>Stage 1 — Normalize:</strong> The input string is lowercased, trimmed, and whitespace-collapsed. This ensures "Hello World" and "hello  world" produce the same persona.</p>
+                    <p style={{marginTop:8}}><strong>Stage 2 — FNV-1a Hash:</strong> The normalized string bytes are concatenated with the worldSeed and hashed via FNV-1a (a fast, non-cryptographic 64-bit hash). This produces a single <code>bigint</code> — the persona seed. No randomness. No external state. Pure bytes in, integer out.</p>
+                    <p style={{marginTop:8}}><strong>Stage 3 — Coordinate Mapping:</strong> The 64-bit persona seed is decomposed into 13 independent coordinate floats using <code>deriveChildHash</code> (a technique from ZeroSwarm). Each coordinate lands in [0, 1] and represents a position along one persona trait axis.</p>
+                    <p style={{marginTop:8}}><strong>Stage 4 — Coherent Noise Field:</strong> Each coordinate is fed through 4-octave coherent noise (the same algorithm that generates ZeroSwarm's capability field). This ensures <em>local coherence</em>: similar coordinates produce similar dimension values. The noise field is what makes persona-space smooth and explorable rather than chaotic.</p>
+                    <p style={{marginTop:8}}><strong>Stage 5 — Prompt Assembly:</strong> The 13 dimension values are thresholded (low/mid/high) into natural-language instruction fragments. Combined with three categorical selectors (domain, voice, reasoning), they assemble into a complete system prompt.</p>
+                  </EduSection>
+
+                  <EduSection title="Why Coherent Noise Matters">
+                    <p>Without coherent noise, nearby hash values would produce unrelated dimension values — the persona space would be random and unexplorable. Coherent noise adds <em>spatial structure</em>: regions of persona space have character. Some regions are analytically dense, some creatively sparse, some warm and verbose, some terse and clinical.</p>
+                    <p style={{marginTop:8}}>This means small changes to the input string often produce small changes to the persona. "Friendly tutor" and "friendly tutor for kids" might produce related but distinct personas. The noise field makes the system <em>navigable</em> rather than a random oracle.</p>
+                    <p style={{marginTop:8}}>The 4-octave structure adds multi-scale detail: octave 1 provides broad regional character, octaves 2-4 add progressively finer variation. This is the same technique used in procedural terrain generation (Perlin/Simplex noise), applied here to behavioral space.</p>
+                  </EduSection>
+
+                  <EduSection title="The 13 Dimensions Explained">
+                    <p><strong>Tier 1 — Communication (5 axes):</strong> How the persona speaks. Verbosity controls length. Formality controls register. Directness controls whether answers are stated or guided. Warmth controls emotional temperature. Humor controls levity.</p>
+                    <p style={{marginTop:8}}><strong>Tier 2 — Cognitive (5 axes):</strong> How the persona thinks. Abstraction controls theory-vs-practice balance. Certainty controls hedging. Creativity controls orthodoxy. Depth controls surface-vs-exhaustive. Pedagogy controls assumed expertise level.</p>
+                    <p style={{marginTop:8}}><strong>Tier 3 — Identity (3 axes):</strong> Who the persona is. Domain Affinity controls generalist-vs-specialist. Temporal Frame controls past-vs-future orientation. Agency controls reactive-vs-proactive behavior.</p>
+                    <p style={{marginTop:8}}>Mid-range values (0.33–0.66) produce no instruction for that axis, allowing natural default behavior. Not every persona needs an opinion on every dimension — this intentional silence is part of the design.</p>
+                  </EduSection>
+
+                  <EduSection title="Categorical Selectors">
+                    <p>In addition to the 13 continuous axes, three <em>categorical</em> values are selected from vocabulary pools using modular arithmetic on child hashes:</p>
+                    <p style={{marginTop:8}}><strong>Domain Archetype</strong> (10 options): The broad expertise family — engineering, humanities, sciences, arts, etc. Selected by <code>deriveChildHash(seed, 100) % 10</code>.</p>
+                    <p style={{marginTop:8}}><strong>Voice Register</strong> (10 options): The linguistic personality type — academic, practitioner, mentor, provocateur, storyteller, etc.</p>
+                    <p style={{marginTop:8}}><strong>Reasoning Style</strong> (8 options): The default approach — deductive, inductive, abductive, analogical, etc.</p>
+                    <p style={{marginTop:8}}>These are drawn from configurable vocabulary pools. In a full deployment, JSON profiles can replace the default pools — the hash arithmetic stays identical, only the words change.</p>
+                  </EduSection>
+
+                  <EduSection title="Top Ten Bookmarks">
+                    <p>The bookmark system stores up to 10 persona references for quick recall. Each bookmark saves the original input string, the pre-computed persona seed (for fast reconstruction), and the coordinate vector (for visual fingerprinting).</p>
+                    <p style={{marginTop:8}}>The string alone is sufficient to reconstruct the persona — just hash it again. But storing coordinates enables visual comparison (overlaying radar charts) and nearest-neighbor queries ("show me personas similar to this one") without re-running the noise pipeline.</p>
+                    <p style={{marginTop:8}}>In this demo, bookmarks are persisted in localStorage. In the full SYNTH-Framework, they would persist to <code>%APPDATA%/synth-framework/personas.json</code> via Tauri's filesystem API.</p>
+                  </EduSection>
+
+                  <EduSection title="Determinism Contract">
+                    <p>The fundamental guarantee: <strong>given the same (inputString, worldSeed) pair, generatePersona() produces a byte-identical Persona object across all machines, all execution orders, and all sessions.</strong></p>
+                    <p style={{marginTop:8}}>No <code>Math.random()</code>. No <code>Date.now()</code> in the generation path. No external state reads. The timestamp on the Persona object is metadata, not a hash input. This is the same determinism contract that governs ZeroSwarm's 9-layer audit — adapted for the persona use case.</p>
+                    <p style={{marginTop:8}}>The worldSeed exists so different installations (or projects) can produce different persona spaces from identical input strings. Two users typing "helpful assistant" with different world seeds get different personas. Same seed, same string → same persona.</p>
+                  </EduSection>
+
+                  <EduSection title="Lineage: ZeroSpecialist → ZeroSwarm → ZeroPersona">
+                    <p><strong>ZeroSpecialist</strong> defined the 9-layer audit framework for deterministic agent identity: hash purity, coherent capability fields, inter-agent affinity, epoch tracking, evolution chains, stigmergic signals, prompt determinism verification, selection protocol, and pattern learning compatibility.</p>
+                    <p style={{marginTop:8}}><strong>ZeroSwarm</strong> implemented the full system as a React/TypeScript application with Zustand state management, Dexie persistence, and OpenRouter API integration. It proved the pipeline works at production scale.</p>
+                    <p style={{marginTop:8}}><strong>ZeroPersona</strong> strips away the swarm machinery (no epochs, no affinity, no signals, no evolutionary selection) and keeps the proven core: FNV-1a hashing, coherent noise fields, and deterministic prompt assembly. It points that core at the user instead of at an automated orchestrator.</p>
+                    <p style={{marginTop:8}}>The <code>hash.ts</code> code is reused verbatim. The noise field is adapted from 2D to 1D-per-axis. The prompt assembler is new (richer dimensions, human-facing templates). The component boundary is new (JSX props instead of Zustand store). But the mathematical foundation is identical.</p>
+                  </EduSection>
+
+                  <EduSection title="Standalone Component Design">
+                    <p>ZeroPersona is designed as a self-contained JSX component droppable into any React project. The component:</p>
+                    <p style={{marginTop:8}}>• Accepts <code>worldSeed</code>, optional <code>profile</code>, and <code>bookmarks</code> as props</p>
+                    <p style={{marginTop:8}}>• Emits <code>onPersonaGenerated(persona)</code> when a persona is created</p>
+                    <p style={{marginTop:8}}>• Emits <code>onBookmarkSave/Delete</code> for persistence (handled by the host)</p>
+                    <p style={{marginTop:8}}>• Has zero external dependencies beyond React</p>
+                    <p style={{marginTop:8}}>• Contains all hash/noise functions internally as pure functions</p>
+                    <p style={{marginTop:8}}>• Makes no API calls, no storage writes, no side effects</p>
+                    <p style={{marginTop:8}}>The host application decides what to do with the generated system prompt. SYNTH-Framework injects it into the Claude Code prompt pipeline. Another project might send it to OpenAI, Anthropic, or any other API. ZeroPersona doesn't care — it produces a string.</p>
+                  </EduSection>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <footer style={{
+        textAlign: 'center', marginTop: 48, padding: '20px 0',
+        borderTop: '1px solid var(--zp-border-dim)',
+      }}>
+        <div style={{ fontFamily: 'var(--zp-font-mono)', fontSize: 10, color: 'var(--zp-text-tertiary)', lineHeight: 1.8 }}>
+          ZeroPersona — ZeroFamily Methodology<br />
+          Pure function pipeline: String → FNV-1a → Coherent Noise → Deterministic Persona<br />
+          No randomness. No storage. No side effects. Same input → same output → forever.
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
