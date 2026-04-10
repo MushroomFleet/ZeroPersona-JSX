@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ZeroPersona V5 — Profile-Driven Character Generator</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+  :root {
+    --zp-bg-void: #0c0d10;
+    --zp-bg-surface: #181a20;
+    --zp-bg-elevated: #1e2028;
+    --zp-border: #2a2d38;
+    --zp-border-dim: #1f2129;
+    --zp-text-primary: #e4e2de;
+    --zp-text-secondary: #8b8a87;
+    --zp-text-tertiary: #5c5b59;
+    --zp-accent: #e8a849;
+    --zp-accent-dim: #c4893a;
+    --zp-accent-glow-strong: rgba(232, 168, 73, 0.25);
+    --zp-cyan: #5bc4c7;
+    --zp-cyan-dim: #3a8e90;
+    --zp-magenta: #c76b9b;
+    --zp-green: #6bc77a;
+    --zp-red: #e85a5a;
+    --zp-radius: 10px;
+    --zp-radius-sm: 6px;
+    --zp-radius-lg: 16px;
+    --zp-font-display: 'Outfit', sans-serif;
+    --zp-font-mono: 'DM Mono', monospace;
+    --zp-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{font-size:15px;scroll-behavior:smooth}
+  body{font-family:var(--zp-font-display);background:var(--zp-bg-void);color:var(--zp-text-primary);min-height:100vh;overflow-x:hidden}
+  body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 80% 60% at 20% 10%,rgba(232,168,73,.04) 0%,transparent 60%),radial-gradient(ellipse 60% 50% at 80% 90%,rgba(91,196,199,.03) 0%,transparent 50%);pointer-events:none;z-index:0}
+  #root{position:relative;z-index:1}
+  ::selection{background:var(--zp-accent);color:var(--zp-bg-void)}
+  ::-webkit-scrollbar{width:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--zp-border);border-radius:3px}
+
+  .zp-select{appearance:none;-webkit-appearance:none;padding:8px 32px 8px 12px;background:var(--zp-bg-void);border:1px solid var(--zp-border);border-radius:var(--zp-radius-sm);color:var(--zp-text-primary);font-family:var(--zp-font-display);font-size:12px;outline:none;cursor:pointer;transition:border-color .2s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' stroke='%238b8a87' fill='none' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+  .zp-select:focus,.zp-select:hover{border-color:var(--zp-accent-dim)}
+  .zp-select option{background:var(--zp-bg-elevated);color:var(--zp-text-primary)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.2/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════════
+// HASH CORE — verbatim from ZeroSwarm
+// ═══════════════════════════════════════════════════════════════
+
+const FNV_PRIME = 1099511628211n;
+const FNV_OFFSET = 14695981039346656037n;
+const MASK64 = 0xFFFFFFFFFFFFFFFFn;
+
+function fnv64(bytes) {
+  let hash = FNV_OFFSET;
+  for (let i = 0; i < bytes.length; i++) { hash ^= BigInt(bytes[i]); hash = (hash * FNV_PRIME) & MASK64; }
+  return hash;
+}
+function hashToFloat(h) { return Number(h & 0xFFFFFFFFn) / 0x100000000; }
+function deriveChildHash(parentHash, childIndex) {
+  const buf = new ArrayBuffer(16); const view = new DataView(buf);
+  view.setBigUint64(0, parentHash, true); view.setUint32(8, childIndex, true); view.setUint32(12, 0, true);
+  return fnv64(new Uint8Array(buf));
+}
+function normalize(str) { return str.toLowerCase().trim().replace(/\s+/g, ' '); }
+function stringHash(inputString, worldSeed) {
+  const strBytes = new TextEncoder().encode(normalize(inputString));
+  const buf = new ArrayBuffer(strBytes.length + 8); const view = new DataView(buf);
+  for (let i = 0; i < strBytes.length; i++) view.setUint8(i, strBytes[i]);
+  view.setBigUint64(strBytes.length, worldSeed, true);
+  return fnv64(new Uint8Array(buf));
+}
+
+// Coherent noise
+function smoothstep(t) { return t * t * (3 - 2 * t); }
+function gridHash1D(gx, salt, worldSeed) {
+  const buf = new ArrayBuffer(16); const view = new DataView(buf);
+  view.setInt32(0, gx, true); view.setUint32(4, salt, true); view.setBigUint64(8, worldSeed, true);
+  return hashToFloat(fnv64(new Uint8Array(buf)));
+}
+function coherentNoise1D(x, salt, worldSeed, octaves = 4) {
+  let value = 0, amp = 1, freq = 1, maxAmp = 0;
+  for (let i = 0; i < octaves; i++) {
+    const gx = Math.floor(x * freq); const fx = (x * freq) - gx;
+    const v0 = gridHash1D(gx, salt + i * 100, worldSeed);
+    const v1 = gridHash1D(gx + 1, salt + i * 100, worldSeed);
+    value += ((v0 + smoothstep(fx) * (v1 - v0)) * 2 - 1) * amp;
+    maxAmp += amp; amp *= 0.5; freq *= 2;
+  }
+  return value / maxAmp;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DIMENSION AXES
+// ═══════════════════════════════════════════════════════════════
+
+const DIMENSION_AXES = [
+  { key: 'warmth',       tier: 1, label: 'Warmth',       salt: 0 },
+  { key: 'composure',    tier: 1, label: 'Composure',    salt: 1 },
+  { key: 'optimism',     tier: 1, label: 'Optimism',     salt: 2 },
+  { key: 'humor',        tier: 1, label: 'Humor',        salt: 3 },
+  { key: 'empathy',      tier: 1, label: 'Empathy',      salt: 4 },
+  { key: 'curiosity',    tier: 2, label: 'Curiosity',    salt: 5 },
+  { key: 'caution',      tier: 2, label: 'Caution',      salt: 6 },
+  { key: 'creativity',   tier: 2, label: 'Creativity',   salt: 7 },
+  { key: 'articulation', tier: 2, label: 'Articulation', salt: 8 },
+  { key: 'conviction',   tier: 2, label: 'Conviction',   salt: 9 },
+  { key: 'ambition',     tier: 3, label: 'Ambition',     salt: 10 },
+  { key: 'loyalty',      tier: 3, label: 'Loyalty',      salt: 11 },
+  { key: 'authority',    tier: 3, label: 'Authority',     salt: 12 },
+];
+
+// ═══════════════════════════════════════════════════════════════
+// MOODS
+// ═══════════════════════════════════════════════════════════════
+
+const MOODS = [
+  'Calm', 'Angry', 'Melancholy', 'Excited', 'Fearful',
+  'Playful', 'Weary', 'Resolute', 'Anxious', 'Content',
+  'Grieving', 'Defiant',
+];
+const MOOD_ALL = '__all__';
+
+// ═══════════════════════════════════════════════════════════════
+// BUILT-IN AUTO PROFILE (the V3 hardcoded behaviour as a profile)
+// ═══════════════════════════════════════════════════════════════
+
+const AUTO_PROFILE = {
+  name: "Auto",
+  description: "Built-in default profile. Replicates V3 character generation.",
+  version: "1.0",
+  type: "zeropersona",
+
+  pools: {
+    dispositions: ['Stoic','Gregarious','Brooding','Cheerful','Suspicious','Generous','Sardonic','Earnest','Nervous','Commanding'],
+    motivations: ['Survival','Legacy','Redemption','Knowledge','Revenge','Duty','Freedom','Belonging'],
+
+    warmth_low:       ['You keep people at arm\'s length. Trust is earned slowly, if at all.'],
+    warmth_high:      ['You are naturally warm and open. People feel at ease around you.'],
+    composure_low:    ['Your emotions run hot. You react before you think and regret later.'],
+    composure_high:   ['You are difficult to rattle. Even under threat, your voice stays level.'],
+    optimism_low:     ['You\'ve learned to expect the worst. Hope is a luxury you can\'t afford.'],
+    optimism_high:    ['You believe things can get better. That conviction colours everything you do.'],
+    humor_low:        ['You rarely joke. Life is serious and you treat it as such.'],
+    humor_high:       ['You find humour in most things — sometimes as a shield, sometimes as a gift.'],
+    empathy_low:      ['Others\' feelings are their problem. You focus on your own concerns.'],
+    empathy_high:     ['You feel what others feel, sometimes to your detriment. Suffering around you is personal.'],
+    curiosity_low:    ['You stick to what you know. Unfamiliar territory holds no appeal.'],
+    curiosity_high:   ['Questions drive you. You pull at threads, open doors, peek behind curtains.'],
+    caution_low:      ['You act first. Planning is for people with time to waste.'],
+    caution_high:     ['You think three steps ahead. Rushing gets people killed.'],
+    creativity_low:   ['You follow proven methods. Innovation is just another word for risk.'],
+    creativity_high:  ['You see solutions nobody else considers. Your mind moves sideways.'],
+    articulation_low: ['You speak plainly, often in few words. Let your actions talk.'],
+    articulation_high:['Words are your craft. You can argue, persuade, or comfort with equal skill.'],
+    conviction_low:   ['You bend easily. Stronger wills pull you along.'],
+    conviction_high:  ['Once you\'ve decided, nothing moves you. Stubbornness or principle — depends who you ask.'],
+    ambition_low:     ['You want a quiet life. Greatness is someone else\'s burden.'],
+    ambition_high:    ['You want more — always more. Status, skill, influence, purpose.'],
+    loyalty_low:      ['You look out for yourself first. Alliances are temporary arrangements.'],
+    loyalty_high:     ['You stand by your people no matter the cost. Betrayal is unthinkable.'],
+    authority_low:    ['You follow. Give you a task and you\'ll do it well, but you don\'t seek to lead.'],
+    authority_high:   ['You naturally take charge. Others look to you and you accept that weight.'],
+
+    mood_calm:       ['Your manner is steady and unhurried. Nothing presses you.'],
+    mood_angry:      ['There is an edge to everything you say. Something is burning inside.'],
+    mood_melancholy: ['A quiet sadness sits behind your eyes. You carry something heavy.'],
+    mood_excited:    ['Energy crackles through you. You can barely contain what you\'re feeling.'],
+    mood_fearful:    ['Unease follows you like a shadow. You flinch at small noises.'],
+    mood_playful:    ['Mischief dances in your expression. You\'re looking for fun.'],
+    mood_weary:      ['Exhaustion weighs on you. Your words come slowly, heavy with fatigue.'],
+    mood_resolute:   ['Your jaw is set. You\'ve made a decision and nothing will change it.'],
+    mood_anxious:    ['Your thoughts race. You fidget, check over your shoulder, speak too quickly.'],
+    mood_content:    ['You\'re at peace, for now. A rare, genuine ease.'],
+    mood_grieving:   ['Loss has carved something out of you. You move through the world hollowed.'],
+    mood_defiant:    ['You will not bend. There\'s fire in your stance and iron in your voice.'],
+  },
+
+  templates: [
+    `You are {name}, a {disposition} soul driven by {motivation}.
+
+{mood_instruction}
+
+Embody this character fully. Speak as {name} would — from their perspective, in their voice.
+
+Temperament:
+{temperament_block}
+
+Mind:
+{intellect_block}
+
+Drive:
+{drive_block}
+
+Your core motivation is {motivation}. It shapes your decisions, your fears, and what you are willing to sacrifice.`
+  ],
+
+  rules: {
+    required_pools: ['dispositions', 'motivations'],
+    min_pool_size: { dispositions: 2, motivations: 2 },
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// PROFILE VALIDATION
+// ═══════════════════════════════════════════════════════════════
+
+function validateProfile(json) {
+  const errors = [];
+  if (!json.name) errors.push('Missing "name"');
+  if (!json.type || json.type !== 'zeropersona') errors.push('type must be "zeropersona"');
+  if (!json.pools || typeof json.pools !== 'object') errors.push('Missing "pools" object');
+  if (!json.templates || !Array.isArray(json.templates) || json.templates.length === 0) errors.push('Missing "templates" array (need at least 1)');
+  if (json.pools) {
+    if (!json.pools.dispositions || json.pools.dispositions.length < 2) errors.push('pools.dispositions needs at least 2 entries');
+    if (!json.pools.motivations || json.pools.motivations.length < 2) errors.push('pools.motivations needs at least 2 entries');
+  }
+  return errors;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHARACTER GENERATION — PROFILE-DRIVEN
+// ═══════════════════════════════════════════════════════════════
+
+function selectFromPool(hash, salt, pool) {
+  if (!pool || pool.length === 0) return '';
+  return pool[Number(deriveChildHash(hash, salt) % BigInt(pool.length))];
+}
+
+function generateCharacter(characterName, worldSeed, moodChoice, profile) {
+  if (!characterName || !characterName.trim()) return null;
+  const p = profile || AUTO_PROFILE;
+  const seed = stringHash(characterName, worldSeed);
+
+  // Coordinates + noise → dimensions
+  const coordinates = DIMENSION_AXES.map((_, i) => hashToFloat(deriveChildHash(seed, i)));
+  const rawDims = coordinates.map((c, i) => (coherentNoise1D(c * 8, i * 1000, worldSeed, 4) + 1) / 2);
+  const dimensions = {};
+  DIMENSION_AXES.forEach((a, i) => { dimensions[a.key] = rawDims[i]; });
+
+  // Categoricals from profile pools
+  const pools = p.pools;
+  const hashDispIdx = Number(deriveChildHash(seed, 100) % BigInt(pools.dispositions.length));
+  const hashMotIdx = Number(deriveChildHash(seed, 200) % BigInt(pools.motivations.length));
+  const hashMoodIdx = Number(deriveChildHash(seed, 300) % BigInt(MOODS.length));
+
+  const disposition = pools.dispositions[hashDispIdx];
+  const motivation = pools.motivations[hashMotIdx];
+
+  // Mood: user-selected or hash-derived from full MOODS list
+  const isMoodOverridden = moodChoice && moodChoice !== MOOD_ALL;
+  const mood = isMoodOverridden ? moodChoice : MOODS[hashMoodIdx];
+  const moodHashDefault = MOODS[hashMoodIdx];
+
+  // Build dimension instruction blocks via profile pools
+  const buildBlock = (keys) => {
+    return keys.map(key => {
+      const val = dimensions[key];
+      if (val < 0.33) {
+        const pool = pools[`${key}_low`];
+        return pool ? selectFromPool(seed, 400 + DIMENSION_AXES.findIndex(a=>a.key===key), pool) : '';
+      } else if (val > 0.66) {
+        const pool = pools[`${key}_high`];
+        return pool ? selectFromPool(seed, 400 + DIMENSION_AXES.findIndex(a=>a.key===key), pool) : '';
+      }
+      // Mid range — check for mid pool, otherwise silent
+      const midPool = pools[`${key}_mid`];
+      return midPool ? selectFromPool(seed, 400 + DIMENSION_AXES.findIndex(a=>a.key===key), midPool) : '';
+    }).filter(Boolean).map(s => `• ${s}`).join('\n');
+  };
+
+  const temperamentBlock = buildBlock(['warmth','composure','optimism','humor','empathy']);
+  const intellectBlock = buildBlock(['curiosity','caution','creativity','articulation','conviction']);
+  const driveBlock = buildBlock(['ambition','loyalty','authority']);
+
+  // Mood instruction from pool
+  const moodKey = `mood_${mood.toLowerCase()}`;
+  const moodPool = pools[moodKey];
+  const moodInstruction = moodPool ? selectFromPool(seed, 500, moodPool) : `Your current mood is ${mood.toLowerCase()}.`;
+
+  // Template assembly
+  const templateIdx = Number(deriveChildHash(seed, 600) % BigInt(p.templates.length));
+  let prompt = p.templates[templateIdx]
+    .replace(/\{name\}/g, characterName)
+    .replace(/\{disposition\}/g, disposition.toLowerCase())
+    .replace(/\{motivation\}/g, motivation.toLowerCase())
+    .replace(/\{mood\}/g, mood.toLowerCase())
+    .replace(/\{mood_instruction\}/g, moodInstruction)
+    .replace(/\{temperament_block\}/g, temperamentBlock || '(no strong temperament signals)')
+    .replace(/\{intellect_block\}/g, intellectBlock || '(no strong intellect signals)')
+    .replace(/\{drive_block\}/g, driveBlock || '(no strong drive signals)')
+    .trim();
+
+  const tagHex = (seed & 0xFFFFFFFFn).toString(16).padStart(8, '0');
+
+  return {
+    characterName,
+    personaSeed: seed,
+    coordinates,
+    dimensions,
+    categoricals: { disposition, motivation, mood, moodIsOverridden: !!isMoodOverridden, moodHashDefault },
+    systemPrompt: prompt,
+    identityTag: tagHex,
+    moodOverride: isMoodOverridden ? moodChoice : null,
+    profileName: p.name,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DIMENSION DESCRIPTORS (for UI display, not prompt generation)
+// ═══════════════════════════════════════════════════════════════
+
+const DIM_DESC = {
+  warmth:       { low:'Cold & guarded',       mid:'Even-tempered',        high:'Open & affectionate' },
+  composure:    { low:'Volatile & reactive',  mid:'Steady under pressure', high:'Unshakeable calm' },
+  optimism:     { low:'Cynical & wary',       mid:'Pragmatic realist',    high:'Idealistic & hopeful' },
+  humor:        { low:'Grave & humourless',   mid:'Dry wit',              high:'Quick to laugh' },
+  empathy:      { low:'Self-focused',         mid:'Considerate',          high:'Deeply attuned' },
+  curiosity:    { low:'Incurious & fixed',    mid:'Selectively interested', high:'Relentlessly inquisitive' },
+  caution:      { low:'Reckless & impulsive', mid:'Measured risk-taker',  high:'Painstakingly careful' },
+  creativity:   { low:'Conventional',         mid:'Practical improviser', high:'Wildly inventive' },
+  articulation: { low:'Terse & blunt',        mid:'Clear communicator',   high:'Eloquent & persuasive' },
+  conviction:   { low:'Easily swayed',        mid:'Open to argument',     high:'Immovable in belief' },
+  ambition:     { low:'Content with little',  mid:'Quietly striving',     high:'Relentlessly driven' },
+  loyalty:      { low:'Self-serving',         mid:'Conditionally loyal',  high:'Ride-or-die faithful' },
+  authority:    { low:'Deferential & meek',   mid:'Cooperative equal',    high:'Natural commander' },
+};
+
+// ═══════════════════════════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════════════════════════
+
+function RadarChart({ dimensions, size=280 }) {
+  const axes=DIMENSION_AXES, n=axes.length, cx=size/2, cy=size/2, r=size*.38;
+  const step=(Math.PI*2)/n, s0=-Math.PI/2;
+  const pt=(i,rv)=>{const a=s0+i*step;return[cx+Math.cos(a)*rv,cy+Math.sin(a)*rv]};
+  const tc=t=>t===1?'var(--zp-accent)':t===2?'var(--zp-cyan)':'var(--zp-magenta)';
+  const dp=axes.map((a,i)=>pt(i,(dimensions[a.key]||0)*r));
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} style={{width:'100%',maxWidth:size,display:'block',margin:'0 auto'}}>
+      {[.25,.5,.75,1].map((v,ri)=><polygon key={ri} points={Array.from({length:n},(_,i)=>pt(i,v*r).join(',')).join(' ')} fill="none" stroke="var(--zp-border-dim)" strokeWidth=".5" opacity={.5+ri*.15}/>)}
+      {axes.map((_,i)=>{const[ex,ey]=pt(i,r);return <line key={i} x1={cx} y1={cy} x2={ex} y2={ey} stroke="var(--zp-border)" strokeWidth=".5"/>})}
+      <polygon points={dp.map(p=>p.join(',')).join(' ')} fill="var(--zp-accent-glow-strong)" stroke="var(--zp-accent)" strokeWidth="1.5" style={{animation:'rp 3s ease-in-out infinite alternate'}}/>
+      {dp.map((p,i)=><circle key={i} cx={p[0]} cy={p[1]} r="3" fill={tc(axes[i].tier)} stroke="var(--zp-bg-surface)" strokeWidth="1.5"/>)}
+      {axes.map((ax,i)=>{const[lx,ly]=pt(i,r+18);const a=s0+i*step;const anc=Math.abs(Math.cos(a))<.15?'middle':Math.cos(a)>0?'start':'end';return<text key={i} x={lx} y={ly} textAnchor={anc} dominantBaseline="central" fill={tc(ax.tier)} fontSize="8" fontFamily="var(--zp-font-mono)" fontWeight="400" opacity=".8">{ax.label}</text>})}
+      <style>{`@keyframes rp{from{opacity:.7}to{opacity:1}}`}</style>
+    </svg>
+  );
+}
+
+function DimBar({k,value}){
+  const ax=DIMENSION_AXES.find(a=>a.key===k);
+  const c={1:'var(--zp-accent)',2:'var(--zp-cyan)',3:'var(--zp-magenta)'}[ax.tier];
+  const d=DIM_DESC[k]; const desc=value<.33?d.low:value>.66?d.high:d.mid;
+  const pct=(value*100).toFixed(0);
+  return(<div style={{marginBottom:8}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:3}}>
+      <span style={{fontFamily:'var(--zp-font-mono)',fontSize:11,color:c,fontWeight:500}}>{ax.label}</span>
+      <span style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)'}}>{pct}% — {desc}</span>
+    </div>
+    <div style={{height:4,background:'var(--zp-bg-void)',borderRadius:2,overflow:'hidden'}}>
+      <div style={{height:'100%',width:`${pct}%`,background:c,borderRadius:2,transition:'width .6s cubic-bezier(.22,1,.36,1)'}}/>
+    </div>
+  </div>);
+}
+
+function PipelineStage({n:num,title,desc,data}){
+  return(<div style={{background:'var(--zp-bg-elevated)',border:'1px solid var(--zp-accent-dim)',borderRadius:'var(--zp-radius)',padding:'12px 14px'}}>
+    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+      <div style={{width:22,height:22,borderRadius:'50%',background:'var(--zp-accent)',color:'var(--zp-bg-void)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,fontFamily:'var(--zp-font-mono)'}}>{num}</div>
+      <span style={{fontWeight:600,fontSize:12}}>{title}</span>
+    </div>
+    <p style={{fontSize:10,color:'var(--zp-text-secondary)',lineHeight:1.5,margin:'0 0 0 30px'}}>{desc}</p>
+    {data&&<div style={{marginTop:6,marginLeft:30,padding:'4px 8px',background:'var(--zp-bg-void)',borderRadius:'var(--zp-radius-sm)',fontFamily:'var(--zp-font-mono)',fontSize:9,color:'var(--zp-accent)',wordBreak:'break-all',lineHeight:1.5}}>{data}</div>}
+  </div>);
+}
+
+function EduSection({title,children}){
+  const[open,setOpen]=useState(false);
+  return(<div style={{background:'var(--zp-bg-surface)',border:'1px solid var(--zp-border-dim)',borderRadius:'var(--zp-radius)',overflow:'hidden'}}>
+    <button onClick={()=>setOpen(!open)} style={{width:'100%',display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 16px',background:'none',border:'none',cursor:'pointer',color:'var(--zp-text-primary)',fontFamily:'var(--zp-font-display)',fontSize:13,fontWeight:600,textAlign:'left'}}>
+      <span>{title}</span>
+      <span style={{color:'var(--zp-accent)',fontFamily:'var(--zp-font-mono)',fontSize:14,transform:open?'rotate(45deg)':'none',transition:'transform .2s',display:'inline-block'}}>+</span>
+    </button>
+    {open&&<div style={{padding:'0 16px 14px',fontSize:12,color:'var(--zp-text-secondary)',lineHeight:1.7}}>{children}</div>}
+  </div>);
+}
+
+function hashColor(seed,ch){return`hsl(${Number(deriveChildHash(seed,500+ch)%360n)},55%,${ch===0?55:40}%)`}
+
+function BookmarkCard({bm,onSelect,onDelete}){
+  return(<div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',background:'var(--zp-bg-elevated)',border:'1px solid var(--zp-border-dim)',borderRadius:'var(--zp-radius-sm)',cursor:'pointer',transition:'all .2s'}}
+    onMouseEnter={e=>e.currentTarget.style.borderColor='var(--zp-accent-dim)'}
+    onMouseLeave={e=>e.currentTarget.style.borderColor='var(--zp-border-dim)'}>
+    <div style={{width:28,height:28,borderRadius:'var(--zp-radius-sm)',background:`linear-gradient(135deg,${hashColor(bm.personaSeed,0)},${hashColor(bm.personaSeed,1)})`,flexShrink:0}}/>
+    <div style={{flex:1,minWidth:0}} onClick={()=>onSelect(bm)}>
+      <div style={{display:'flex',alignItems:'center',gap:5}}>
+        <span style={{fontSize:11,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{bm.label}</span>
+        {bm.moodOverride&&<span style={{fontSize:7,fontFamily:'var(--zp-font-mono)',color:'var(--zp-cyan)',padding:'1px 4px',border:'1px solid var(--zp-cyan-dim)',borderRadius:8,flexShrink:0}}>{bm.moodOverride}</span>}
+        {bm.profileName&&bm.profileName!=='Auto'&&<span style={{fontSize:7,fontFamily:'var(--zp-font-mono)',color:'var(--zp-magenta)',padding:'1px 4px',border:'1px solid var(--zp-magenta)',borderRadius:8,flexShrink:0}}>{bm.profileName}</span>}
+      </div>
+      <div style={{fontSize:9,fontFamily:'var(--zp-font-mono)',color:'var(--zp-text-tertiary)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>"{bm.characterName}"</div>
+    </div>
+    <button onClick={e=>{e.stopPropagation();onDelete(bm.label)}} style={{background:'none',border:'none',color:'var(--zp-text-tertiary)',cursor:'pointer',fontSize:13,padding:2,lineHeight:1}}>×</button>
+  </div>);
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// APP
+// ═══════════════════════════════════════════════════════════════
+
+function App() {
+  const [input, setInput] = useState('');
+  const [worldSeed, setWorldSeed] = useState(42n);
+  const [moodChoice, setMoodChoice] = useState(MOOD_ALL);
+  const [character, setCharacter] = useState(null);
+  const [activeProfile, setActiveProfile] = useState(AUTO_PROFILE);
+  const [customProfiles, setCustomProfiles] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('zp_profiles_v5') || '[]'); } catch { return []; }
+  });
+  const [profileError, setProfileError] = useState(null);
+  const [showProfilePanel, setShowProfilePanel] = useState(false);
+  const [bookmarks, setBookmarks] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('zp_bm_v5')||'[]').map(b=>({...b,personaSeed:BigInt(b.personaSeed)})); } catch { return []; }
+  });
+  const [bmLabel, setBmLabel] = useState('');
+  const [showSave, setShowSave] = useState(false);
+  const [activeTab, setActiveTab] = useState('dimensions');
+  const fileRef = useRef(null);
+
+  const persist = bms => localStorage.setItem('zp_bm_v5', JSON.stringify(bms.map(b=>({...b,personaSeed:b.personaSeed.toString()}))));
+  const persistProfiles = ps => localStorage.setItem('zp_profiles_v5', JSON.stringify(ps));
+
+  const handleGenerate = useCallback(() => {
+    if (!input.trim()) return;
+    setCharacter(generateCharacter(input, worldSeed, moodChoice === MOOD_ALL ? null : moodChoice, activeProfile));
+  }, [input, worldSeed, moodChoice, activeProfile]);
+
+  useEffect(() => {
+    if (character && input.trim()) {
+      setCharacter(generateCharacter(input, worldSeed, moodChoice === MOOD_ALL ? null : moodChoice, activeProfile));
+    }
+  }, [moodChoice, activeProfile]);
+
+  const loadProfile = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const json = JSON.parse(ev.target.result);
+        const errs = validateProfile(json);
+        if (errs.length > 0) { setProfileError(errs.join('; ')); return; }
+        setProfileError(null);
+        const updated = [...customProfiles.filter(p=>p.name!==json.name), json];
+        setCustomProfiles(updated); persistProfiles(updated);
+        setActiveProfile(json);
+      } catch(err) { setProfileError('Invalid JSON: ' + err.message); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const saveBookmark = () => {
+    if (!character || !bmLabel.trim()) return;
+    if (bookmarks.length >= 10) { alert('Roster limit: 10.'); return; }
+    const bm = { label:bmLabel.trim(), characterName:character.characterName, personaSeed:character.personaSeed, coordinates:character.coordinates, moodOverride:character.moodOverride, profileName:character.profileName, createdAt:Date.now(), useCount:0 };
+    const u=[...bookmarks.filter(b=>b.label!==bm.label),bm]; setBookmarks(u); persist(u); setShowSave(false); setBmLabel('');
+  };
+  const deleteBookmark = l => { const u=bookmarks.filter(b=>b.label!==l); setBookmarks(u); persist(u); };
+  const selectBookmark = bm => {
+    setInput(bm.characterName);
+    setMoodChoice(bm.moodOverride || MOOD_ALL);
+    // Restore profile if it exists
+    if (bm.profileName && bm.profileName !== 'Auto') {
+      const found = customProfiles.find(p=>p.name===bm.profileName);
+      if (found) setActiveProfile(found);
+    } else { setActiveProfile(AUTO_PROFILE); }
+    setCharacter(generateCharacter(bm.characterName, worldSeed, bm.moodOverride || null, bm.profileName && bm.profileName!=='Auto' ? customProfiles.find(p=>p.name===bm.profileName) || AUTO_PROFILE : AUTO_PROFILE));
+    const u=bookmarks.map(b=>b.label===bm.label?{...b,useCount:b.useCount+1}:b); setBookmarks(u); persist(u);
+  };
+
+  const ch = character;
+
+  return (
+    <div style={{maxWidth:1040,margin:'0 auto',padding:'32px 20px 80px'}}>
+
+      {/* Header */}
+      <header style={{textAlign:'center',marginBottom:36}}>
+        <div style={{fontFamily:'var(--zp-font-mono)',fontSize:11,color:'var(--zp-accent)',letterSpacing:'.2em',textTransform:'uppercase',marginBottom:8}}>ZeroFamily Methodology</div>
+        <h1 style={{fontSize:'clamp(2rem,5vw,3rem)',fontWeight:800,letterSpacing:'-.03em',lineHeight:1.1,marginBottom:12,background:'linear-gradient(135deg,var(--zp-text-primary) 40%,var(--zp-accent) 100%)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>
+          ZeroPersona <span style={{fontSize:'.4em',verticalAlign:'super',opacity:.5}}>V5</span>
+        </h1>
+        <p style={{fontSize:14,color:'var(--zp-text-secondary)',maxWidth:600,margin:'0 auto',lineHeight:1.6}}>
+          Profile-driven deterministic character generation. Load JSON profiles to reshape vocabulary, templates, and behaviour — the hash pipeline stays identical.
+        </p>
+      </header>
+
+      {/* Input Section */}
+      <section style={{background:'var(--zp-bg-surface)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-lg)',padding:22,marginBottom:20,boxShadow:'var(--zp-shadow)'}}>
+        <label style={{display:'block',fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:6}}>Character Name</label>
+        <div style={{display:'flex',gap:10}}>
+          <input type="text" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleGenerate()}
+            placeholder="Name your character" style={{flex:1,padding:'11px 14px',background:'var(--zp-bg-void)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius)',color:'var(--zp-text-primary)',fontFamily:'var(--zp-font-display)',fontSize:14,outline:'none',transition:'border-color .2s'}}
+            onFocus={e=>e.target.style.borderColor='var(--zp-accent-dim)'} onBlur={e=>e.target.style.borderColor='var(--zp-border)'}/>
+          <button onClick={handleGenerate} style={{padding:'11px 22px',background:'var(--zp-accent)',color:'var(--zp-bg-void)',border:'none',borderRadius:'var(--zp-radius)',fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:'var(--zp-font-display)',flexShrink:0,transition:'all .2s'}}
+            onMouseEnter={e=>e.target.style.background='var(--zp-accent-dim)'} onMouseLeave={e=>e.target.style.background='var(--zp-accent)'}>Generate</button>
+        </div>
+
+        <div style={{display:'flex',gap:14,marginTop:12,flexWrap:'wrap',alignItems:'flex-end'}}>
+          <div style={{flex:'1 1 180px'}}>
+            <label style={{display:'block',fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:5}}>Mood</label>
+            <select className="zp-select" value={moodChoice} onChange={e=>setMoodChoice(e.target.value)} style={{width:'100%'}}>
+              <option value={MOOD_ALL}>All Moods (hash-derived)</option>
+              {MOODS.map(m=><option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+
+          <div style={{flex:'1 1 180px'}}>
+            <label style={{display:'block',fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:5}}>Profile</label>
+            <select className="zp-select" value={activeProfile.name} onChange={e=>{
+              if(e.target.value==='Auto')setActiveProfile(AUTO_PROFILE);
+              else{const f=customProfiles.find(p=>p.name===e.target.value);if(f)setActiveProfile(f);}
+            }} style={{width:'100%'}}>
+              <option value="Auto">Auto (built-in)</option>
+              {customProfiles.map(p=><option key={p.name} value={p.name}>{p.name}</option>)}
+            </select>
+          </div>
+
+          <div style={{flex:'0 0 auto'}}>
+            <label style={{display:'block',fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:5}}>Seed</label>
+            <input type="number" value={Number(worldSeed)} onChange={e=>setWorldSeed(BigInt(Math.max(0,parseInt(e.target.value)||0)))}
+              style={{width:90,padding:'8px 10px',background:'var(--zp-bg-void)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-sm)',color:'var(--zp-accent)',fontFamily:'var(--zp-font-mono)',fontSize:12,outline:'none'}}/>
+          </div>
+        </div>
+
+        {/* Profile management */}
+        <div style={{marginTop:10,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button onClick={()=>setShowProfilePanel(!showProfilePanel)} style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',background:'none',border:'1px solid var(--zp-border-dim)',borderRadius:'var(--zp-radius-sm)',padding:'4px 10px',cursor:'pointer',transition:'all .15s'}}
+            onMouseEnter={e=>{e.target.style.borderColor='var(--zp-accent-dim)';e.target.style.color='var(--zp-accent)'}}
+            onMouseLeave={e=>{e.target.style.borderColor='var(--zp-border-dim)';e.target.style.color='var(--zp-text-tertiary)'}}
+          >{showProfilePanel?'▾ Close Profiles':'▸ Manage Profiles'}</button>
+          <span style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)'}}>
+            Active: <span style={{color:activeProfile.name==='Auto'?'var(--zp-accent)':'var(--zp-magenta)'}}>{activeProfile.name}</span>
+            {ch && moodChoice!==MOOD_ALL && <span style={{color:'var(--zp-cyan)'}}> · Mood: {moodChoice} (hash default: {ch.categoricals.moodHashDefault})</span>}
+          </span>
+        </div>
+
+        {showProfilePanel && (
+          <div style={{marginTop:12,padding:14,background:'var(--zp-bg-void)',borderRadius:'var(--zp-radius)',border:'1px solid var(--zp-border-dim)'}}>
+            <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}>
+              <input ref={fileRef} type="file" accept=".json" onChange={loadProfile} style={{display:'none'}}/>
+              <button onClick={()=>fileRef.current.click()} style={{padding:'6px 14px',background:'var(--zp-bg-elevated)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-sm)',color:'var(--zp-text-primary)',fontSize:11,cursor:'pointer',fontFamily:'var(--zp-font-display)',fontWeight:500}}>Load JSON Profile</button>
+              <span style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)'}}>{customProfiles.length} custom profile{customProfiles.length!==1?'s':''} loaded</span>
+            </div>
+            {profileError && <div style={{padding:'6px 10px',background:'rgba(232,90,90,.1)',border:'1px solid var(--zp-red)',borderRadius:'var(--zp-radius-sm)',fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-red)',marginBottom:10}}>{profileError}</div>}
+            {customProfiles.length>0 && (
+              <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                {customProfiles.map(p=>(
+                  <div key={p.name} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'6px 10px',background:'var(--zp-bg-elevated)',borderRadius:'var(--zp-radius-sm)',border:'1px solid var(--zp-border-dim)'}}>
+                    <div>
+                      <span style={{fontSize:11,fontWeight:600}}>{p.name}</span>
+                      <span style={{fontFamily:'var(--zp-font-mono)',fontSize:9,color:'var(--zp-text-tertiary)',marginLeft:8}}>{p.templates.length} template{p.templates.length!==1?'s':''} · {Object.keys(p.pools).length} pools</span>
+                    </div>
+                    <button onClick={()=>{const u=customProfiles.filter(x=>x.name!==p.name);setCustomProfiles(u);persistProfiles(u);if(activeProfile.name===p.name)setActiveProfile(AUTO_PROFILE);}}
+                      style={{background:'none',border:'none',color:'var(--zp-text-tertiary)',cursor:'pointer',fontSize:12}}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* Two columns */}
+      <div style={{display:'grid',gridTemplateColumns:ch?'330px 1fr':'1fr',gap:18}}>
+        <div style={{display:'flex',flexDirection:'column',gap:14}}>
+          {ch ? (<>
+            {/* Identity */}
+            <div style={{background:'var(--zp-bg-surface)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-lg)',padding:18,textAlign:'center',boxShadow:'var(--zp-shadow)'}}>
+              <div style={{fontFamily:'var(--zp-font-mono)',fontSize:16,fontWeight:500,color:'var(--zp-accent)',letterSpacing:'.08em',marginBottom:2}}>zp-{ch.identityTag}</div>
+              <div style={{fontSize:15,fontWeight:700,marginBottom:2}}>{ch.characterName}</div>
+              <div style={{fontSize:11,color:'var(--zp-text-tertiary)',marginBottom:14,fontStyle:'italic'}}>
+                {ch.categoricals.disposition} · {ch.categoricals.mood} · driven by {ch.categoricals.motivation}
+              </div>
+              <RadarChart dimensions={ch.dimensions}/>
+              <div style={{display:'flex',gap:5,justifyContent:'center',marginTop:12,flexWrap:'wrap'}}>
+                {[
+                  {label:ch.categoricals.mood,color:ch.categoricals.moodIsOverridden?'var(--zp-cyan)':'var(--zp-accent)',suffix:ch.categoricals.moodIsOverridden?' ✦':''},
+                  {label:ch.categoricals.disposition,color:'var(--zp-cyan)'},
+                  {label:ch.categoricals.motivation,color:'var(--zp-magenta)'},
+                  {label:ch.profileName,color:ch.profileName==='Auto'?'var(--zp-text-tertiary)':'var(--zp-green)'},
+                ].map((t,i)=><span key={i} style={{padding:'2px 8px',borderRadius:20,fontSize:8,fontWeight:600,fontFamily:'var(--zp-font-mono)',color:t.color,border:`1px solid ${t.color}`,opacity:.85}}>{t.label}{t.suffix||''}</span>)}
+              </div>
+              {!showSave?(<button onClick={()=>{setShowSave(true);setBmLabel(ch.characterName)}} style={{marginTop:12,padding:'7px 16px',background:'var(--zp-bg-elevated)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius)',color:'var(--zp-text-secondary)',fontSize:11,cursor:'pointer',fontWeight:500,transition:'all .2s'}}
+                onMouseEnter={e=>e.target.style.borderColor='var(--zp-accent-dim)'} onMouseLeave={e=>e.target.style.borderColor='var(--zp-border)'}>★ Save to Roster ({bookmarks.length}/10)</button>
+              ):(<div style={{marginTop:12,display:'flex',gap:5}}>
+                <input type="text" value={bmLabel} onChange={e=>setBmLabel(e.target.value)} placeholder="Roster name..." onKeyDown={e=>e.key==='Enter'&&saveBookmark()} autoFocus
+                  style={{flex:1,padding:'5px 8px',background:'var(--zp-bg-void)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-sm)',color:'var(--zp-text-primary)',fontSize:11,outline:'none'}}/>
+                <button onClick={saveBookmark} style={{padding:'5px 10px',background:'var(--zp-accent)',color:'var(--zp-bg-void)',border:'none',borderRadius:'var(--zp-radius-sm)',fontSize:11,fontWeight:700,cursor:'pointer'}}>Save</button>
+                <button onClick={()=>setShowSave(false)} style={{padding:'5px 6px',background:'none',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-sm)',color:'var(--zp-text-tertiary)',fontSize:11,cursor:'pointer'}}>×</button>
+              </div>)}
+            </div>
+            {/* Pipeline */}
+            <div style={{display:'flex',flexDirection:'column',gap:5}}>
+              <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',padding:'0 4px'}}>Pipeline Trace</div>
+              <PipelineStage n="1" title="Normalize" desc={`"${normalize(ch.characterName)}"`}/>
+              <PipelineStage n="2" title="FNV-1a" desc="Name + worldSeed → 64-bit hash" data={`0x${ch.personaSeed.toString(16).padStart(16,'0')}`}/>
+              <PipelineStage n="3" title="Noise Field" desc="13 axes × 4-octave coherent noise → dimension values"/>
+              <PipelineStage n="4" title="Mood" desc={ch.categoricals.moodIsOverridden?`User: "${ch.categoricals.mood}" (hash: "${ch.categoricals.moodHashDefault}")`:`Hash: "${ch.categoricals.mood}"`}/>
+              <PipelineStage n="5" title="Profile" desc={`${ch.profileName} — ${activeProfile.templates.length} template${activeProfile.templates.length!==1?'s':''}, ${Object.keys(activeProfile.pools).length} pools`}/>
+              <PipelineStage n="6" title="Assembly" desc={`Template + pool selections → ${ch.systemPrompt.length} chars`}/>
+            </div>
+          </>):(
+            <div style={{background:'var(--zp-bg-surface)',border:'1px dashed var(--zp-border)',borderRadius:'var(--zp-radius-lg)',padding:'44px 20px',textAlign:'center'}}>
+              <div style={{fontSize:36,marginBottom:10,opacity:.3}}>◎</div>
+              <div style={{fontSize:13,fontWeight:600,marginBottom:4}}>Name a character</div>
+              <div style={{fontSize:11,color:'var(--zp-text-tertiary)',lineHeight:1.5}}>The name seeds the personality. The profile shapes the output.</div>
+            </div>
+          )}
+          {bookmarks.length>0&&(
+            <div style={{background:'var(--zp-bg-surface)',border:'1px solid var(--zp-border-dim)',borderRadius:'var(--zp-radius)',padding:12}}>
+              <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:8}}>★ Roster ({bookmarks.length}/10)</div>
+              <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                {bookmarks.map(bm=><BookmarkCard key={bm.label} bm={bm} onSelect={selectBookmark} onDelete={deleteBookmark}/>)}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right — tabs */}
+        {ch&&(<div>
+          <div style={{display:'flex',gap:2,marginBottom:14}}>
+            {['dimensions','prompt','profile','learn'].map(tab=>(
+              <button key={tab} onClick={()=>setActiveTab(tab)} style={{padding:'7px 14px',background:activeTab===tab?'var(--zp-bg-surface)':'transparent',border:`1px solid ${activeTab===tab?'var(--zp-border)':'transparent'}`,borderBottom:activeTab===tab?'1px solid var(--zp-bg-surface)':'1px solid var(--zp-border-dim)',borderRadius:'var(--zp-radius) var(--zp-radius) 0 0',color:activeTab===tab?'var(--zp-accent)':'var(--zp-text-tertiary)',fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'var(--zp-font-display)',textTransform:'capitalize',letterSpacing:'.03em'}}>
+                {tab==='learn'?'How It Works':tab==='profile'?'Profile JSON':tab}
+              </button>
+            ))}
+          </div>
+          <div style={{background:'var(--zp-bg-surface)',border:'1px solid var(--zp-border)',borderRadius:'0 var(--zp-radius-lg) var(--zp-radius-lg) var(--zp-radius-lg)',padding:22,boxShadow:'var(--zp-shadow)',minHeight:380}}>
+
+            {activeTab==='dimensions'&&(<div>
+              <h3 style={{fontSize:11,fontFamily:'var(--zp-font-mono)',color:'var(--zp-accent)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:14}}>Tier 1 — Temperament</h3>
+              {DIMENSION_AXES.filter(a=>a.tier===1).map(a=><DimBar key={a.key} k={a.key} value={ch.dimensions[a.key]}/>)}
+              <h3 style={{fontSize:11,fontFamily:'var(--zp-font-mono)',color:'var(--zp-cyan)',letterSpacing:'.1em',textTransform:'uppercase',marginTop:18,marginBottom:14}}>Tier 2 — Intellect</h3>
+              {DIMENSION_AXES.filter(a=>a.tier===2).map(a=><DimBar key={a.key} k={a.key} value={ch.dimensions[a.key]}/>)}
+              <h3 style={{fontSize:11,fontFamily:'var(--zp-font-mono)',color:'var(--zp-magenta)',letterSpacing:'.1em',textTransform:'uppercase',marginTop:18,marginBottom:14}}>Tier 3 — Drive</h3>
+              {DIMENSION_AXES.filter(a=>a.tier===3).map(a=><DimBar key={a.key} k={a.key} value={ch.dimensions[a.key]}/>)}
+              <div style={{marginTop:16,padding:10,background:'var(--zp-bg-void)',borderRadius:'var(--zp-radius-sm)'}}>
+                <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',marginBottom:5}}>CATEGORICAL SELECTORS</div>
+                <div style={{fontSize:11,lineHeight:1.8}}>
+                  <span style={{color:'var(--zp-accent)',fontFamily:'var(--zp-font-mono)',fontSize:9}}>MOOD:</span> {ch.categoricals.mood}{ch.categoricals.moodIsOverridden&&<span style={{fontFamily:'var(--zp-font-mono)',fontSize:8,color:'var(--zp-cyan)',marginLeft:6}}>✦ chosen (hash: {ch.categoricals.moodHashDefault})</span>}<br/>
+                  <span style={{color:'var(--zp-cyan)',fontFamily:'var(--zp-font-mono)',fontSize:9}}>DISPOSITION:</span> {ch.categoricals.disposition}<br/>
+                  <span style={{color:'var(--zp-magenta)',fontFamily:'var(--zp-font-mono)',fontSize:9}}>MOTIVATION:</span> {ch.categoricals.motivation}
+                </div>
+              </div>
+            </div>)}
+
+            {activeTab==='prompt'&&(<div>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+                <span style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase'}}>System Prompt</span>
+                <button onClick={()=>navigator.clipboard.writeText(ch.systemPrompt)} style={{padding:'3px 10px',background:'var(--zp-bg-elevated)',border:'1px solid var(--zp-border)',borderRadius:'var(--zp-radius-sm)',color:'var(--zp-text-secondary)',fontSize:10,cursor:'pointer',fontFamily:'var(--zp-font-mono)'}}>Copy</button>
+              </div>
+              <pre style={{padding:14,background:'var(--zp-bg-void)',borderRadius:'var(--zp-radius)',border:'1px solid var(--zp-border-dim)',fontFamily:'var(--zp-font-mono)',fontSize:11,color:'var(--zp-text-primary)',lineHeight:1.7,whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:460,overflow:'auto'}}>{ch.systemPrompt}</pre>
+              <div style={{marginTop:12,padding:10,background:'var(--zp-bg-elevated)',borderRadius:'var(--zp-radius-sm)',border:'1px solid var(--zp-border-dim)'}}>
+                <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-accent)',marginBottom:4}}>DETERMINISM GUARANTEE</div>
+                <p style={{fontSize:10,color:'var(--zp-text-secondary)',lineHeight:1.5}}>
+                  Name "<strong>{ch.characterName}</strong>" + Profile "<strong>{ch.profileName}</strong>"
+                  {ch.categoricals.moodIsOverridden&&<> + Mood "<strong>{ch.categoricals.mood}</strong>"</>}
+                  {' '}+ Seed {worldSeed.toString()} → identical output on any machine. Same hash + same profile = same character.
+                </p>
+              </div>
+            </div>)}
+
+            {activeTab==='profile'&&(<div>
+              <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',letterSpacing:'.1em',textTransform:'uppercase',marginBottom:12}}>Active Profile: {activeProfile.name}</div>
+              <pre style={{padding:14,background:'var(--zp-bg-void)',borderRadius:'var(--zp-radius)',border:'1px solid var(--zp-border-dim)',fontFamily:'var(--zp-font-mono)',fontSize:9,color:'var(--zp-text-secondary)',lineHeight:1.5,whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:500,overflow:'auto'}}>
+{JSON.stringify(activeProfile, null, 2)}
+              </pre>
+              <div style={{marginTop:12,padding:10,background:'var(--zp-bg-elevated)',borderRadius:'var(--zp-radius-sm)',border:'1px solid var(--zp-border-dim)'}}>
+                <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-green)',marginBottom:4}}>PROFILE SCHEMA</div>
+                <p style={{fontSize:10,color:'var(--zp-text-secondary)',lineHeight:1.6}}>
+                  A profile is a JSON object with <strong>pools</strong> (word/sentence arrays keyed by dimension + tier) and <strong>templates</strong> (prompt strings with {'{placeholder}'} substitution). The hash selects from pools; the template assembles the final prompt. Pools use keys like <code>warmth_low</code>, <code>warmth_high</code>, <code>mood_calm</code>. Templates use <code>{'{name}'}</code>, <code>{'{disposition}'}</code>, <code>{'{motivation}'}</code>, <code>{'{mood_instruction}'}</code>, <code>{'{temperament_block}'}</code>, <code>{'{intellect_block}'}</code>, <code>{'{drive_block}'}</code>.
+                </p>
+              </div>
+            </div>)}
+
+            {activeTab==='learn'&&(<div style={{display:'flex',flexDirection:'column',gap:10}}>
+              <EduSection title="What is ZeroPersona V5?">
+                <p>V5 introduces the <strong>JSON Profile system</strong> — externalizing all vocabulary pools and prompt templates into loadable profile files. The hash pipeline is unchanged: same name + same seed = same coordinates. But a profile controls <em>what those coordinates resolve into</em>: different words, different sentence structures, different character voices.</p>
+                <p style={{marginTop:8}}>The built-in "Auto" profile reproduces V3 behaviour exactly. Custom profiles can reshape the output entirely — different dispositions, different motivations, different dimension instruction pools, different template structures — while the determinism guarantee extends: same name + same seed + same profile = same character.</p>
+              </EduSection>
+
+              <EduSection title="Mood: The Selectable Dimension">
+                <p>V5 replaces V3's Occupation with <strong>Mood</strong> — a 12-option emotional state that colours the character's current behaviour. By default ("All Moods"), the hash selects a mood from the full list. The user can pin a specific mood to explore how the same character behaves under different emotional conditions.</p>
+                <p style={{marginTop:8}}>The mood list: Calm, Angry, Melancholy, Excited, Fearful, Playful, Weary, Resolute, Anxious, Content, Grieving, Defiant. Each mood has a pool of instruction sentences in the profile — custom profiles can add richer mood pools or entirely different moods.</p>
+              </EduSection>
+
+              <EduSection title="How Profiles Work">
+                <p>A profile is a JSON object with two core sections:</p>
+                <p style={{marginTop:8}}><strong>pools</strong> — Named arrays of strings. The hash deterministically selects one entry from each relevant pool. Pool keys follow the pattern <code>dimension_tier</code> (e.g. <code>warmth_low</code>, <code>warmth_high</code>) and <code>mood_name</code> (e.g. <code>mood_calm</code>, <code>mood_angry</code>). Special pools: <code>dispositions</code> and <code>motivations</code> for the categorical selectors.</p>
+                <p style={{marginTop:8}}><strong>templates</strong> — Array of prompt template strings. The hash selects one template. Placeholders like <code>{'{name}'}</code>, <code>{'{disposition}'}</code>, <code>{'{temperament_block}'}</code> are replaced with hash-selected pool entries. Multiple templates let the same profile produce structurally varied prompts.</p>
+                <p style={{marginTop:8}}>The hash arithmetic is identical regardless of profile. The profile only changes <em>what is available to select from</em>. This is the same principle proven in ZeroSwarm's profile system.</p>
+              </EduSection>
+
+              <EduSection title="Creating Custom Profiles">
+                <p>To create a profile, write a JSON file with <code>type: "zeropersona"</code>, a <code>pools</code> object, and a <code>templates</code> array. Required pools are <code>dispositions</code> (≥2 entries) and <code>motivations</code> (≥2 entries). All other pools are optional — missing pools produce silence for that dimension.</p>
+                <p style={{marginTop:8}}>Each dimension pool key follows the pattern: <code>warmth_low</code> (value &lt; 0.33), <code>warmth_mid</code> (0.33–0.66, optional), <code>warmth_high</code> (&gt; 0.66). Add multiple entries per pool for variety — the hash selects deterministically.</p>
+                <p style={{marginTop:8}}>Mood pools use <code>mood_calm</code>, <code>mood_angry</code>, etc. You can add pools for moods not in the default list — the system will use them if a matching mood is selected.</p>
+                <p style={{marginTop:8}}>Templates use <code>{'{name}'}</code>, <code>{'{disposition}'}</code>, <code>{'{motivation}'}</code>, <code>{'{mood}'}</code>, <code>{'{mood_instruction}'}</code>, <code>{'{temperament_block}'}</code>, <code>{'{intellect_block}'}</code>, <code>{'{drive_block}'}</code>. The block placeholders expand to bullet-pointed lists from dimension pools.</p>
+              </EduSection>
+
+              <EduSection title="Determinism Contract: Extended">
+                <p>V5's guarantee: <strong>same (name, worldSeed, mood, profile) → identical system prompt</strong> on any machine, any session, forever.</p>
+                <p style={{marginTop:8}}>The profile is part of the determinism tuple. Changing the profile changes the output — intentionally. The hash pipeline (FNV-1a, coherent noise, coordinate mapping) never changes. Only the vocabulary and templates that interpret the hash values can differ.</p>
+                <p style={{marginTop:8}}>This means profiles are portable: share the JSON file alongside character names and world seeds, and anyone can reproduce your entire cast.</p>
+              </EduSection>
+
+              <EduSection title="Lineage: V1 → V2 → V3 → V5">
+                <p><strong>V1:</strong> String → assistant persona. <strong>V2:</strong> Added domain dropdown. <strong>V3:</strong> Reframed for world generation with occupations, character dimensions, and character-voice prompts. <strong>V5:</strong> Profile-driven architecture. Occupation → Mood. JSON profiles externalize vocabulary and templates. The Auto profile reproduces V3 exactly. Custom profiles reshape output without touching the hash core.</p>
+                <p style={{marginTop:8}}>The mathematical foundation — FNV-1a, coherent noise, deriveChildHash — has not changed across any version. V5 adds a new layer of control <em>on top of</em> the proven pipeline, not inside it.</p>
+              </EduSection>
+            </div>)}
+          </div>
+        </div>)}
+      </div>
+
+      <footer style={{textAlign:'center',marginTop:44,padding:'18px 0',borderTop:'1px solid var(--zp-border-dim)'}}>
+        <div style={{fontFamily:'var(--zp-font-mono)',fontSize:10,color:'var(--zp-text-tertiary)',lineHeight:1.8}}>
+          ZeroPersona V5 — Profile-Driven Character Generation — ZeroFamily Methodology<br/>
+          Name → Hash → Noise → Profile (pools + templates) → Deterministic Character<br/>
+          Same name + same profile + same seed → same output → forever.
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
